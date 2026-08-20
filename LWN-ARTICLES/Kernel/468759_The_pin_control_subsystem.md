@@ -1,0 +1,36 @@
+---
+title: The pin control subsystem
+url: https://lwn.net/Articles/468759/
+date: "November 22, 2011"
+category: Device drivers; Pin controller
+author: "By Jonathan Corbet November 22, 2011"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+By **Jonathan Corbet**  
+November 22, 2011
+
+Classic x86-style processors are designed to fit into a mostly standardized system architecture, so they all tend, in a general sense, to look alike. One of the reasons why it is hard to make a general-purpose kernel for embedded processors is the absence of this standardized architecture. Embedded processors must be extensively configured, at boot time, to be able to run the system they are connected to at all. The 3.1 kernel saw the addition of the "pin controller" subsystem which is intended to help with that task; enhancements are on the way for (presumably) 3.2 as well. This article will provide a superficial overview of how the pin controller works. 
+
+A typical system-on-chip (SOC) will have hundreds of pins (electrical connectors) on it. Many of those pins have a well-defined purpose: supplying power or clocks to the processor, video output, memory control, and so on. But many of these pins - again, possibly hundreds of them - will have no single defined purpose. Most of them can be used as general-purpose I/O (GPIO) pins that can drive an LED, read the state of a pushbutton, perform serial input or output, or activate an integrated pepper spray dispenser. Some subsets of those pins can be organized into groups to serve as an I2C port, an I2S port, or to perform any of a number of other types of multi-signal communications. Many of the pins can be configured with a number of different electrical characteristics. 
+
+Without a proper configuration of its pins, an SOC will not function properly - if at all. But the right pin configuration is entirely dependent on the board the SOC is a part of; a processor running in one vendor's handset will be wired quite differently than the same processor in another vendor's cow-milking machine. Pin configuration is typically done as part of the board-specific startup code; the system-specific nature of that code prevents a kernel built for one device from running on another even if the same processor is in use. Pin configuration also tends to involve a lot of cut-and-pasted, duplicated code; that, of course, is the type of code that the embedded developers (and the ARM developers in particular) are trying to get rid of. 
+
+The idea behind the pin control subsystem is to create a centralized mechanism for the management and configuration of multi-function pins, replacing a lot of board-specific code. This subsystem is quite thoroughly documented in [Documentation/pinctrl.txt](<https://lwn.net/Articles/465077/>). A core developer would use the pin control code to describe a processor's multi-function pins and the uses to which each can be put. Developers enabling a specific board can then use that configuration to set up the pins as needed for their deployment. 
+
+The first step is to tell the subsystem which pins the processor provides; that is a simple matter of enumerating their names and associating each with an integer pin number. A call to `pinctrl_register()` will make those pins known to the system as a whole. The mapping of numbers to pins is up to the developer, but it makes sense to, for example, keep a bank of GPIO pins together to simplify coding later on. 
+
+One of the interesting things about multi-function pins is that many of them can be assigned as a group to an internal functional unit. As a simple example, one could imagine that pins 122 and 123 can be routed to an internal I2C controller. Other types of ports may take more pins; an I2S port to talk to a codec needs at least three, while SPI ports need four. It is not generally possible to connect an arbitrary set of pins to any controller; usually an internal controller has a very small number of possible routings. These routings can also conflict with each other; pin 77, say, could be either an I2C SCL line or an SPI SCLK line, but it cannot serve both purposes at the same time. 
+
+The pin controller allows the developer to define "pin groups," essentially named arrays of pins that can be assigned as a group to a controller. Groups can (and often will) overlap each other; the pin controller will ensure that overlapping groups cannot be selected at the same time. Groups can be associated with "functions" describing the controllers to which they can be attached. Some functions may have a single pin group that can be used; others will have multiple groups. 
+
+There are some other bits and pieces (some glue to make the pin controller work easily with the GPIO subsystem, for example), but the above describes most of the functionality found in the 3.1 version of the pin controller. Using this structure, board developers can register one or more `pinmux_map` structures describing how the pins are actually wired on the target system. That work can be done in a board file, or, presumably, be generated from a device tree file. The pin controller will use the mapping to ensure that no pins have been assigned to more than one function; it will then instruct the low-level pinmux driver to configure the pins as described. All of that work is now done in common code. 
+
+The pin multiplexer on a typical SOC can do a lot more than just assign a pin to a specific function, though. There is typically a wealth of options for each pin. Different pins can be driven to different voltages, for example; they can also be connected to pull-up or pull-down resistors to bias a line to a specific value. Some pins can be configured to detect input signal changes and generate an interrupt or a wakeup event. Others may be able to perform debouncing. It adds up to a fair amount of complexity which is often reflected in the board-specific setup code. 
+
+The [generic pin configuration interface](<https://lwn.net/Articles/468770/>), currently in its third revision, attempts to bring the details of pin configuration into the pin controller core. To that end, it defines 17 (at last count) parameters that might be settable on a given pin; they vary from the value of the pullup resistor to be used through slew rates for rising or falling signals and whether the pin can be a source of wakeup events. With this code in place, it should become possible to describe the complete configuration of complex pin multiplexors entirely within the pin controller. 
+
+The number of pin controller users in the 3.1 kernel is relatively small, but there are a number of patches circulating to expand its usage. With the addition of the configuration interface (in the 3.2 kernel, probably), there will be even more reason to make use of it. One of the more complicated bits of board-level configuration will be supported almost entirely in common code, with all of the usual code quality and maintainability benefits. It is hard to stick a pin into an improvement like that.

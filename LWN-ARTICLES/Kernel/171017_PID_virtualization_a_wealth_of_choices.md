@@ -1,0 +1,21 @@
+---
+title: "PID virtualization: a wealth of choices"
+url: https://lwn.net/Articles/171017/
+date: "February 8, 2006"
+category: "Containers; Virtualization-Containers"
+author: 
+---
+
+A set of patches for the management of virtual process IDs within containers was discussed here [a few weeks ago](<http://lwn.net/Articles/168093/>). That patch set drew some interest, but a fair amount of concern as well. It is a large set of changes reaching all over the kernel; it seemed to many that there should be a better way. Since then, two candidates for the "better way" have been posted, and the situation seems less clear than ever. This sort of virtualization is clearly of interest to a number of projects, but there is little consensus on how it should be done. 
+
+One of the new entrants is the [OpenVZ PID virtualization code](<http://lwn.net/Articles/170569/>), posted by Kirill Korotaev but originally developed by Alexey Kuznetsov. These patches introduce a container called a VPS (virtual private server), each of which can virtualize a number of aspects of the host system, including process IDs. Each process has a real and virtual PID; all PIDs of the virtual variety are identified by having a specific bit set. In the simple case, the virtual-PID bit is the only difference between the real and virtual IDs, but more complex mappings are possible as well. 
+
+There is the usual set of functions to convert between real and virtual PIDs (and group, process group, and thread IDs as well). All code which deals with user space must work with virtual PIDs, but internal code uses real PIDs, so a certain amount of awareness is called for. Since there is a specific bit used to mark virtual PIDs, the code is at least able to catch situations where the wrong type of PID is used. There is also a change to the internal `fork()` implementation allowing a process to be created with a specific virtual PID; this feature can be used to launch a new container with its top-level process having PID 1\. 
+
+The other implementation is [this "process ID namespace" patch set](<http://lwn.net/Articles/170802/>) from Eric Biederman. It does away with the concept of virtual PIDs in favor of a different view of the problem. For starters, every process gets a "wait ID" - the process ID by which its parents know it. In most cases, the "wait ID" will be the same as the PID, but, in cases where a process is the leader of a virtualized group, the two will be different. 
+
+Then Eric adds process ID spaces. A process ID space (pspace) is simply a range of independent PIDs, associated with tree of processes. By default, the entire system shares one process space, but, by way of a `clone()` flag, a new process can be created in its own space. Process IDs are unique within any one pspace, but may be duplicated in other spaces. So the kernel, when it must identify a process unambiguously using a PID, must now use a (pspace, PID) tuple. Functions which deal in PIDs - `kill_pg()` or `find_task_by_pid()`, for example - get a new pspace parameter. 
+
+This approach has the advantage that there is no distinction between real and virtual PIDs - _all_ PIDs are interpreted relative to a PID space. There is no real possibility of confusing real and virtual PIDs, or interpreting PIDs relative to the wrong pspace. So it should be a relatively safe addition to the kernel. On the other hand, Eric's patches don't even try to address the larger virtualization problem; anybody wanting to implement complete containers will still have to do that work separately. Of course, as has been seen, a few projects have already done that work; it's just a matter of seeing which implementation, if any, gets into the mainline. 
+
+On that question, it is far too early to say what might happen. Linus has [indicated](<https://lwn.net/Articles/171025/>) that he likes the container concept from the OpenVZ patches, but that does not necessarily extend to the PID virtualization part of it. Eric has tried to focus the discussion with [a summary of the relevant issues](<https://lwn.net/Articles/171026/>) and questions which must be resolved going forward. But there is a certain amount of disagreement, and a few projects which have each invested significant time into their particular approaches. It may be a while before the dust settles on this one.

@@ -1,0 +1,42 @@
+---
+title: "The hard life of a virtual-filesystem developer"
+url: https://lwn.net/Articles/960088/
+date: "February 1, 2024"
+category: "Filesystems-Virtual filesystem layer"
+author: "By Jonathan Corbet February 1, 2024"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+February 1, 2024
+
+Filesystem development is not an easy task; the performance demands are typically high, and the consequences for mistakes usually involve lost data and irate users. The implementation of a virtual (or "pseudo") filesystem — a filesystem implemented within the kernel and lacking a normal backing store — can also be challenging, but for different reasons. A series of conversations around the eventfs virtual filesystem has turned a spotlight on the difficulty of creating a virtual filesystem for Linux. 
+
+The longstanding "tracefs" virtual filesystem provides access to the [ftrace](<https://docs.kernel.org/trace/ftrace.html>) tracing system; among other things, it implements a directory with a set of control files for every tracepoint known to the system. A quick look on a 6.6 kernel shows over 2,800 directories containing over 16,000 files. Until the 6.6 release, the kernel had to maintain directory entry ("dentry") and inode structures for each of those directories and files; all of those structures consumed quite a bit of memory. 
+
+For added fun, multiple instances of the tracepoint hierarchy can be mounted, with each one causing the kernel to duplicate all of that memory overhead. Even with a single tracepoint hierarchy, the chances are that almost none of the files contained within it will be accessed over the life of the system, so the memory is simply wasted. 
+
+Eventfs was merged in 6.6 as a way of eliminating this waste. It is a reimplementation of the portion of tracefs that represents the actual tracepoints, but optimized so that dentries and inodes are only allocated when a file is actually accessed. Vast amounts of memory were returned to the system for better use, and there was widespread rejoicing. 
+
+That rejoicing would have been more enthusiastic, though, had not a series of bugs, some with security implications, turned up in eventfs. This filesystem has required a long series of fixes — a process that is ongoing as of this writing. As all this has unfolded, there has been an extensive series of long threads between tracing maintainer Steve Rostedt, Linus Torvalds, and others. Among other things, there have been discussions on [the size reported](<https://lwn.net/ml/linux-kernel/20240126131837.36dbecc8@gandalf.local.home/>) for virtual files, whether those files [should have unique inode numbers](<https://lwn.net/ml/linux-kernel/20240126150209.367ff402@gandalf.local.home/>), and many conversations on the details of interfacing with the kernel's virtual filesystem (VFS) layer. In the end, Torvalds ended up creating [a patch series](<https://lwn.net/ml/linux-kernel/20240130190355.11486-1-torvalds@linux-foundation.org/>) addressing a number of problems in eventfs. 
+
+For those wanting rather more sensational coverage than is LWN's habit, now might be a good time to search out the articles published elsewhere. The focus here will be on two points that came out in the discussions. 
+
+One of those is that documentation for would-be filesystem developers is lacking. Some, including VFS maintainer Christian Brauner, would [disagree](<https://lwn.net/ml/linux-mm/20240129-umrechnen-kaiman-cb591bc22fc5@brauner/>) with that claim. There is, indeed, [a fair amount of VFS documentation](<https://docs.kernel.org/filesystems/>), including detailed descriptions of the VFS locking rules, which are some of the most complex in the kernel. But the number of things that Rostedt, who is not an inexperienced kernel developer, stumbled over during the course of this work makes it clear that many things remain undocumented. That is perhaps especially true for a developer wanting to implement a virtual filesystem, which tends to be a one-time project entered into by a developer whose focus is on another part of the kernel. 
+
+Consider, for example, the subsystem known as "kernfs". It is a framework designed to ease the implementation of virtual filesystems; it is currently used to implement control groups and the [resctrl](<https://docs.kernel.org/arch/x86/resctrl.html>) filesystem. It seems like exactly what a developer of a virtual filesystem would need, except for one little problem: it is meticulously undocumented. No attempt has been made to describe its use; as a result, when Rostedt considered it, he [concluded](<https://lwn.net/ml/linux-mm/20240125214007.67d45fcf@rorschach.local.home/>): ""kernfs doesn't look trivial and I can't find any documentation on how to use it"" and passed it by. 
+
+Perhaps, had kernfs been more accessible when eventfs was developed, it would have been found suitable to the task and would have helped to prevent the long series of mistakes that plagued eventfs. Perhaps, if the missing documentation were to be provided, the next virtual filesystem project could have an easier time of it. 
+
+There is another problem, though, that was nicely [spelled out](<https://lwn.net/ml/linux-mm/CAHk-=whXg6zAHWZ7f+CdOg5GOMffR3RSDVyvORTZhipxp5iAFQ@mail.gmail.com/>) by Torvalds: the VFS layer is oriented toward the needs of "real" filesystems, those that are charged with the task of persistently storing data in a hierarchical directory structure. As a result, it has a lot of performance-driven quirks that are not only unhelpful for virtual filesystems, they also complicate the task of implementing those filesystems. To take it even further, though, the whole filesystem concept is a bit of an awkward fit for virtual filesystems: 
+
+> And realize that [they] aren't really designed to be filesystems per se - they are literally designed to be something entirely different, and the filesystem interface is then only a secondary thing - it's a window into a strange non-filesystem world where normal filesystem operations don't even exist, even if sometimes there can be some kind of convoluted transformation for them. 
+
+That results in pathologies like even simple filesystem operations ([`stat()`](<https://man7.org/linux/man-pages/man2/lstat.2.html>) on a `/proc` file, for example) not working properly in virtual filesystems. In a normal filesystem, the lifetime of the files themselves is directly tied to filesystem operations. The objects represented in a virtual filesystem, instead, have unrelated lifetimes of their own. The combination of two separate worlds, Torvalds said, is ""why virtual filesystems are generally a complete mess"". 
+
+So how does one improve on this situation? One approach would be to abandon the idea of a virtual filesystem entirely, saying that the filesystem abstraction is simply not suitable for this kind of kernel ABI. Arguably, that is what the networking subsystem (along with some others) has done by adopting [netlink](<https://docs.kernel.org/userspace-api/netlink/intro.html>) for complex interfaces. Netlink works well for many things, but it is not a universally popular interface. An older variant of this approach, of course, is to simply provide a set of [`ioctl()`](<https://man7.org/linux/man-pages/man2/ioctl.2.html>) calls. Use of `ioctl()` is somewhat discouraged, though; it tends to produce widely varying interfaces that see little review before being merged into the kernel. Yet another approach is the addition of new system calls, as was done by the VFS layer itself with the [`listmount()` and `statmount()` system calls](<https://lwn.net/Articles/950569/>) that were merged for the 6.8 release. 
+
+In the end, though, there is value to a filesystem-oriented interface. It is familiar to users, scriptable, and relatively well defined. If everything is a file, then utilities written to work with files can be brought to bear. That is why virtual filesystems have proliferated over the years; it suggests that there would be value in making it easier for developers to correctly implement virtual filesystems. That, in turn, indicates that putting some effort into APIs like kernfs and, crucially, documenting them could do a lot to make life less difficult for the next developer who takes on a virtual filesystem project.

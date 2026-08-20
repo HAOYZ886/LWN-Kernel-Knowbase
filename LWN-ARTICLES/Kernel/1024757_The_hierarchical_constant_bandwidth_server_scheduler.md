@@ -1,0 +1,42 @@
+---
+title: The hierarchical constant bandwidth server scheduler
+url: https://lwn.net/Articles/1024757/
+date: "June 18, 2025"
+category: "Realtime; Scheduler-Realtime"
+author: "By Jonathan Corbet June 18, 2025"
+---
+
+> **LWN.net needs you!**
+> 
+> Without subscribers, LWN would simply not exist. Please consider [signing up for a subscription](<https://lwn.net/Promo/nst-nag2/subscribe>) and helping to keep LWN publishing. 
+
+By **Jonathan Corbet**  
+June 18, 2025
+
+The [POSIX realtime model](<https://pubs.opengroup.org/onlinepubs/7908799/xsh/realtime.html>), which is implemented in the Linux kernel, can ensure that a realtime process obtains the CPU time it needs to get its job done. It can be less effective, though, when there are multiple realtime processes competing for the available CPU resources. The [hierarchical constant bandwidth server](<https://lwn.net/ml/all/20250605071412.139240-1-yurand2000@gmail.com>) patch series, posted by Yuri Andriaccio with work by Luca Abeni, Alessio Balsini, and Andrea Parri, is a modification to the Linux scheduler intended to make it possible to configure systems with multiple realtime tasks in a deterministic and correct manner. 
+
+The core concept behind POSIX realtime is priority — the highest-priority task always runs. If there are multiple processes at the same priority, the result depends on whether they are configured as `SCHED_FIFO` tasks (in which case the running task gets the CPU until it voluntarily gives it up) or as `SCHED_RR` (causing the equal-priority tasks to share the CPU in time slices). This model allows a single realtime task to monopolize a CPU indefinitely, perhaps at the expense of other realtime tasks that also need to run. 
+
+In an attempt to improve support for systems with multiple realtime tasks, the [realtime group scheduling](<https://docs.kernel.org/scheduler/sched-rt-group.html>) feature was added to the 2.6.25 kernel in 2008 by Peter Zijlstra. It allows a system administrator to put realtime tasks into control groups, then to limit the amount of CPU time available to each group. This feature works and is used, but it has never been seen as an optimal solution. It is easy to misconfigure (the documentation warns that ""fiddling with these settings can result in an unstable system""), complicates the scheduler in a number of ways, and lacks a solid theoretical underpinning. 
+
+Kernel developers are not always strongly motivated by theoretical proofs, preferring to observe how real-world systems actually behave. But a certain amount of rigor can be appropriate in the realtime realm. If a realtime system is being used to, for example, guide a motor vehicle on a busy highway, it's important that said system quickly obtain its needed CPU time when that time is needed. "It appears to work most of the time" is not deemed sufficient for such applications. 
+
+What realtime group scheduling is aiming for is called a "constant bandwidth server" (CBS) scheduler. In such a system, each task is characterized by two parameters: the amount of CPU time it needs (the "worst-case execution time") and how often it needs that time (the "period"). In a properly configured system, the scheduler can ensure that every realtime task gets the CPU time it needs when it needs that time. There _is_ a CBS scheduler in the kernel now, in the form of the deadline scheduler (see [this article](<https://lwn.net/Articles/743946/>) by the much-missed Daniel Bristot de Oliveira for details), but this scheduler is not hierarchical, and requires realtime tasks to be written specifically for it. 
+
+The hierarchical CBS server is an extension of the CBS concept to allow multiple realtime tasks to be organized (and controlled) in a hierarchy — specifically, the control-group hierarchy on Linux systems. It was first described in [this 2001 paper by Giuseppe Lipari and Sanjoy Baruah](<http://retis.sssup.it/~lipari/papers/lipariBaruah2001-1.pdf>). The actual implementation, of course, is somewhat removed from an academic paper, but it relies on that paper's theoretical underpinnings. 
+
+When running under the hierarchical constant bandwidth server, each control group has two knobs to control the resource reservation: `cpu.rt_period_us` (the period) and `cpu.rt_runtime_us` (the required CPU time); both knobs are expressed in microseconds. If `cpu.rt_period_us` is set to `1000000`, and `cpu.rt_runtime_us` is set to `100000`, then the tasks placed within that control group will be entitled to 100ms of CPU time every second, or 10% of one CPU overall. Within the group, tasks will compete with each other using the normal priority rules. 
+
+To implement this guarantee, the hierarchical CBS scheduler reuses a mechanism that was first added for a different purpose: the [deadline server](<https://lwn.net/Articles/934415/>). It has long been deemed important to set aside a small amount of CPU time for normal-priority tasks to run, even if a realtime task wants all of the time it can get. That small window of time can be used, for example, to regain control of a system if a realtime task has gone off the rails and will not release the CPU. 
+
+Implementing this behavior has proved challenging in the past; for years, a throttling mechanism was used to push realtime tasks out of the CPU for 5% (by default) of the available time. This exclusion would happen, though, even if nothing else needed to run, causing the CPU to go idle when a realtime task was runnable. This behavior irritated developers enough that a solution was eventually found. 
+
+That solution was to create a special task called a "deadline server" that would run under the deadline scheduler. Deadline tasks have the highest priority of all under Linux, with the ability to push aside even POSIX realtime tasks. The deadline server is configured to run in such a way that it is entitled to 5% of the available CPU time (50ms out of every second); it uses that time to run tasks in the normal-priority run queues. If there are tasks waiting to run, the deadline server ensures that they get a chance; if, instead, there are no runnable tasks, the deadline server just gives up the CPU, making it available for any realtime tasks that may be competing for it. 
+
+Deadline servers, thus, were added to ensure that non-realtime tasks could run, but they can also be pressed into service for realtime tasks. When a control group is configured to run under the hierarchical CBS server, a deadline server is set up to run for the execution time and period configured for that group. When the deadline server runs, it will schedule the tasks within that group in the usual way, ensuring that the group as a whole gets the resources assigned to it, even if there are higher-priority realtime tasks trying to run elsewhere in the system. 
+
+The algorithm described in the paper only envisions a two-level control-group hierarchy, with the root group being one of those levels. That should suffice for most real-world realtime applications; excess complexity does not help in the design of a correctly functioning realtime system. Even so, [the final patch](<https://lwn.net/ml/all/20250605071412.139240-10-yurand2000@gmail.com>) in the series modifies the implementation to allow deeper control-group hierarchies. Only the leaf groups (those with no child groups) are able to contain realtime tasks, though. Given the use of absolute CPU-time and period values in CBS, multiple layers of control do not make sense the way they do with normal (non-realtime) group scheduling. 
+
+The end result is a solution that is, hopefully, more deterministic than realtime group scheduling while having less of an impact on the scheduler's code. One positive indication in the latter regard is that the patch series, after removing the existing realtime group code, adds the new functionality while reducing the size of the scheduler by nearly 400 lines. 
+
+This work was [discussed](<https://lwn.net/Articles/1021332/#hcbs>) at the 2025 Power Management and Scheduling in the Linux Kernel Summit, so there should be a general consensus on the direction that it is taking. The number of comments on the posted series, as of this writing, is small; that will probably change over time as other developers get a chance to look at the code. In any case, a change of this nature is likely to take a while before it is considered ready for the mainline kernel; as always, one should never assume that a deadline applies to the acceptance of realtime patches.

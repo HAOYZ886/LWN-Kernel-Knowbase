@@ -1,0 +1,50 @@
+---
+title: Converting filesystems to iomap
+url: https://lwn.net/Articles/935934/
+date: "June 27, 2023"
+category: "Filesystems-iomap"
+author: "By Jake Edge June 27, 2023 LSFMM+BPF"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jake Edge**  
+June 27, 2023
+
+* * *
+
+[LSFMM+BPF](<https://lwn.net/Articles/lsfmmbpf2023>)
+
+A discussion that largely centered around the [documentation of iomap](<https://kernelnewbies.org/KernelProjects/iomap>), which provides a block-mapping interface for modern filesystems, was led by Luis Chamberlain at the [2023 Linux Storage, Filesystem, Memory-Management and BPF Summit](<https://lwn.net/Articles/lsfmmbpf2023>). There is an ongoing process of converting filesystems to use iomap, in order to [leave buffer heads behind](<https://lwn.net/Articles/931809/>) and to better support [folios](<https://lwn.net/Articles/893512/>), so the intent was to get feedback on the documentation from developers who are working on those conversions. One of the concrete outcomes of the session was a plan to move that documentation from its current location on the KernelNewbies wiki [into the kernel documentation](<https://lwn.net/ml/linux-fsdevel/20230518144037.3149361-1-mcgrof@kernel.org/>). 
+
+Hannes Reinecke said that the lack of clear units in the iomap documentation confused him; were things specified in bytes, sectors, pages, or something else? In addition, there are many different operation-function pointers, in three different `struct *_ops`, that need to be provided by a filesystem, but it was not clear to him what each of them was meant to do. Chamberlain said that it had also confused him when he started looking at iomap, but the basic idea is that there are lots of different types of operations, many with flags or options of various sorts, so the myriad of ops are just meant to split those out into their own separate functions. The alternative is a single function with lots of complexity to handle all of the different possibilities. Reinecke said that he was fine with having all of those functions, but that the documentation did not (yet) explain what all the operations were for. 
+
+The documentation tries to explain what is needed to convert a filesystem to use iomap, Chamberlain said. There are sections for direct I/O, buffered I/O, file-extent mapping, and so on. Iomap provides an iterator for ranges; it tries to replace the existing block-range operations. As was discussed in the earlier buffer-head session, though, there are no helpers for metadata operations in iomap. Filesystems have to implement their own metadata handling, as XFS does, or continue to use buffer heads for that. Adding helpers to iomap is possible, but may not be all that useful because the filesystems that have their own metadata operations are not likely to want to switch to something new, he said. 
+
+Reinecke summarized the current thinking on iomap; it is the interface that new filesystems should be using and, as discussed in the [large-block-size session](<https://lwn.net/Articles/933437/>), it will be the only way for filesystems to support block sizes larger than the page size. He noted that the [patch set allowing buffer heads to be configured out of the kernel](<https://lwn.net/Articles/930173/>) may not really be useful, though, because UEFI systems need a VFAT filesystem, which currently requires buffer heads. He has patches to convert VFAT to iomap, which are partially working at this point, so that problem may go away in time. 
+
+The suggested order for reworking filesystems in the iomap documentation should be switched, Reinecke said; it currently has direct I/O as the first thing to convert, but he thought it should be left for last. Josef Bacik said that Btrfs has been doing the conversion and it started with direct I/O, because changing the buffered-I/O path requires reworking a lot more code; he thinks that the direct-I/O conversion is more straightforward for filesystems to tackle first. 
+
+Ted Ts'o cautioned that doing conversions on the simpler filesystems first may not be the right path either. Iomap is missing some of the necessary infrastructure to make the process less painful; metadata reads and writes are a prime example of that. In addition, many of the simple filesystems do not support direct I/O at all, so they cannot start there; meanwhile they do need the ability to read and write metadata, so asking them to convert right now is likely to result in developers who "run away screaming". 
+
+Jan Kara said that there are two facets to the iomap conversion: handling the data path with iomap, which is ready to be done now, and removing buffer heads, which is a separate question that requires a "sane story for them". It is important to recognize that filesystems cannot be forced to fully convert to iomap, Reinecke said; that is the eventual goal, but it may never be reached. Kara said that he had patches queued that convert the ext2 direct-I/O data path to iomap; those patches also include some VFS changes that will make that conversion easier for the simpler filesystems. The more complex filesystems, such as ext4, Btrfs, and XFS, do not need those changes because they already have internal helpers. He is working with Ritesh Harjani on converting the rest of the ext2 data path to iomap. 
+
+The next step would be to convert the metadata handling, but there are not good answers for that yet. Reinecke said he had been working with others to provide helpers that will allow filesystems to request data transfers in sizes smaller than a page, and get back a folio and offset into it where the data is located; for his purposes, it does not really matter if 512 bytes or a whole page is read as long as he knows where to get the data he is interested in. Then, the sub-page write piece needs to be worked out; once those pieces are in place, the conversion of the metadata paths can be tackled. 
+
+Harjani came in over the remote link to talk about the work he has been doing on the buffered-I/O path for ext2. There are some open problems, one of which is being addressed by a [patch series](<https://lwn.net/ml/linux-fsdevel/cover.1687140389.git.ritesh.list@gmail.com/>) under review for sub-page dirty tracking. Another issue is that the `BH_Boundary` flag is currently used for filesystems, like ext2, that can have indirect blocks that are discontinuous; if the BIO covering the range gets rearranged, it can lead to a sub-optimal data-access pattern. The flag is not supported in iomap, but probably needs to be the next piece addressed after the dirty tracking. 
+
+Ts'o said that the issue really only affected filesystems that use V7-Unix-style indirect blocks, which VFAT, for example, does not use; modern filesystems use extent mapping instead. So this may be an example of something that iomap may want to support for better performance for those older filesystems like ext2, minix, and UFS, but it may be decided that the performance without adding the feature is good enough and "we'll live with a performance hit on those older filesystems". 
+
+This is another reason that the documentation should make it clear that iomap is still being developed; the interfaces that eventually shake out may be different than what is there today. The documentation may change over time because people are working to make it easier for filesystems to use iomap, but that is still under construction. "We shouldn't promise that it is going to be easy, because it is not easy ... yet." 
+
+Support for the older filesystems is generally only needed to be able to access the filesystems, Reinecke said; there is no real need to ensure that they are particularly fast. For things like VFAT or the ISO CD-ROM filesystem, slowing them down slightly will not really be noticed; they were slow to begin with, after all. So he suggested not spending a lot of time making things faster for those cases; "if you care, write a different filesystem". 
+
+Chamberlain noted that Kara had mentioned the [Linux Test Project](<https://github.com/linux-test-project/ltp>) (LTP) test suite as one that is good to use for testing these kinds of changes, but wondered if there were others. Kara said that there are direct-I/O tests in fstests that can also be used. 
+
+There has been a lot of work done by Goldwyn Rodrigues on locking, Chamberlain said, that needs to get into the kernel so that Btrfs can convert more than just the direct-I/O path to iomap. Rodrigues came in remotely to say that the worst part of the problems he has been tackling, extent locking within the page lock, is mostly working at this point, though there are "a couple of hackish patches". He is hoping to get the patch set out for review soon, which will presumably lead to some better ideas for the hacks. 
+
+Kara reported to Harjani that he had just poked around in the code and did not think the `BH_Boundary` flag will be much of a problem. It is meant to tell the block layer that the filesystem needs to submit the read before it has the information to submit further reads, but iomap simply returns each contiguous extent, so it implicitly handles that case. Kara said that Harjani can ignore the boundary-handling issue and "it will be mostly fine". 
+
+Chamberlain closed the session by asking attendees, particularly those who are working on converting filesystems to use iomap, to review the documentation on the wiki. He outlined how to get edit rights there and suggested that developers simply reflect their comments in the wiki text itself; in a kernel release or two, it could be submitted to the mainline. An attendee said that "sooner is better", and others agreed, so Chamberlain said that he would simply post it to the mailing list for review.

@@ -1,0 +1,36 @@
+---
+title: Udev and firmware
+url: https://lwn.net/Articles/518942/
+date: "October 10, 2012"
+category: "Device drivers-Firmware loading; Firmware; udev"
+author: "By Jonathan Corbet October 10, 2012"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jonathan Corbet**  
+October 10, 2012
+
+Those who like to complain about udev, systemd, and their current maintainers have had no shortage of company recently as the result of a somewhat incendiary discussion on the linux-kernel mailing list. Underneath the flames, though, lie some important issues: who decides what constitutes appropriate behavior for kernel device drivers, how strong is our commitment to backward compatibility, and which tasks are best handled in the kernel without calling out to user space? 
+
+The udev process is responsible for a number of tasks, most initiated as the result of events originating in the kernel. It responds to device creation events by making device nodes, setting permissions, and, possibly, running a setup program. It also handles module loading requests and firmware requests from the kernel. So, for example, when a driver calls `request_firmware()`, that request is turned into an event that is passed to the udev process. Udev will, in response, locate the firmware file, read its contents, and pass the data back to the kernel. The driver will get its firmware blob without having to know anything about how things are organized in user space, and everybody should be happy. 
+
+Back in January, the udev developers decided to implement a stricter notion of sequencing between various types of events. No events for a specific device, they decided, would be processed until the process of loading the driver module for that device had completed. Doing things this way makes it easier for them to keep things straight in user space and to avoid attempting operations that the kernel is not yet ready to handle. But it also created problems for some types of drivers. In particular, if a driver tries to load device firmware during the module initialization process, things will appear to lock up. Udev sees that the module is not yet initialized, so it will hold onto the firmware request and everything stops. Udev developer Kay Sievers [warned the world](<http://www.spinics.net/lists/netdev/msg185742.html>) about this problem last January: 
+
+We might need to work around that in the current udev for now, but these drivers will definitely break in future udev versions. Userspace, these days, should not be in charge of papering over obvious kernel bugs like this. 
+
+The problem with this line of reasoning, of course, is that one person's kernel bug is another's user-space problem. Firmware loading at module initialization time has worked just fine for a long time — if one ignores little problems like built-in modules, booting with `init=/bin/sh`, and other situations where proper user-space support is not present when the `request_firmware()` call takes place. What matters most is that it works for a normal bootstrap on a typical distribution install. The udev sequencing change breaks that: users of a number of distributions have been reporting that things no longer work properly with newer versions of udev installed. 
+
+Breaking currently-running systems is something the kernel development community tries hard to avoid, so it is not surprising that there was some disagreement over the appropriateness of the udev changes. Even so, various kernel developers were trying to work around the problems when Linus threw [a bit of a tantrum](<https://lwn.net/Articles/518945/>), saying that the problem lies with udev and needs to be fixed there. He did not get the response that he was hoping for. 
+
+Kay [answered](<https://lwn.net/Articles/518946/>) that, despite the problem reports, udev had not yet been fixed, saying ""we still haven't wrapped our head around how to fix it/work around it."" He pointed out that things don't really hang, they just get "slow" while waiting for a 30-second timeout to expire. And he reiterated his position that the real problem lies in the kernel and should be fixed there. Linus was [unimpressed](<https://lwn.net/Articles/518948/>), but, since he does not maintain udev, there is not a whole lot that he can do directly to solve the problem. 
+
+Or, then again, maybe there is. One possibility raised by a few developers was pulling udev into the kernel source tree and maintaining it as part of the kernel development process. There was a certain amount of support for this idea, but nobody actually stepped up to take responsibility for maintaining udev in that environment. Such a move would represent a fork of a significant package that would take it in a new direction; current plans are to integrate udev more thoroughly with systemd. The current udev developers thus seem unlikely to support putting udev in the kernel tree. Getting distributors to adopt the kernel's version of udev could also prove to be a challenge. In general, it is the sort of mess that is best avoided if at all possible. 
+
+An alternative is to simply short out udev for firmware loading altogether. That is, in fact, what has been done; the 3.7 kernel will include a patch (from Linus) that causes firmware loading to be done directly from the kernel without involving user space at all. If the kernel is unable to find the firmware file in the expected places (under `/lib/firmware` and variants) it will fall back to sending a request to udev in the usual manner. But if the kernel-space load attempt works, then udev will never even know that the firmware request was made. 
+
+This appears to be a solution that is workable for everybody involved. There is nothing particularly tricky about firmware loading, so few developers seem to have concerns about doing it directly from the kernel. Kay [supports the idea](<https://lwn.net/Articles/518951/>) as well, saying ""I would absolutely like to get udev entirely out of the sick game of firmware loading"". The real proof will be in how well the concept works once the 3.7 kernel starts seeing widespread testing, but the initial indications are that there will not be a lot of problems. If things stay that way, it would not be surprising to see the direct firmware loading patch backported to the stable series — once it has gained a few amenities like user-configurable paths. 
+
+One of the biggest challenges in kernel design can be determining what should be done in the kernel and what should be pushed out to user space. The user-space solution is often appealing; it can simplify kernel code and make it easier for others to implement their own policies. But an overly heavy reliance on user space can lead to just the sort of difficulty seen with firmware loading. In this case, it appears, the problem was better solved in the kernel; fortunately, it appears to have been a relatively easy one for the kernel to take back without causing compatibility problems.

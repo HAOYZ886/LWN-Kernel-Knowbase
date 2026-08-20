@@ -1,0 +1,23 @@
+---
+title: Some patches of interest
+url: https://lwn.net/Articles/173882/
+date: "February 28, 2006"
+category: Build system; Delay accounting; Modules
+author: 
+---
+
+There's a few patches in circulation which merit a quick look. 
+
+What if you could improve kernel performance by 10% without writing any code? Arjan van de Ven has posted [a patch](<http://lwn.net/Articles/173657/>) which, he says, does just that - at least, for some specific benchmarks. This patch uses an obscure gcc option which causes the compiler to put every function into its own ELF section. Then, the linker is instructed to arrange those functions into a specific order in the final executable. 
+
+A typical, current x86-64 kernel (the architecture Arjan has been working with) fills on the order of 4MB of memory. The kernel uses large pages to hold its text, but a kernel of that size will still require at least two translation buffer (TLB) entries to cover its entire code body. But some kernel functions are used more heavily than others; much of the code in the kernel \- error handling, for example - never gets run at all if you are lucky. So, if all of the regularly-used functions are moved to the beginning of the kernel image, the kernel should be able to operate with a single TLB entry for its text - most of the time. TLB entries are important: if an address is found in the TLB, the processor can avoid looking it up in the page tables, speeding access significantly. They are also scarce. So allowing the kernel to operate within a single TLB entry makes a big difference. 
+
+There are some details to work out yet. Optimizing TLB use will require that the kernel be loaded at a TLB-aligned address, which is not currently done on many architectures. There is another part of Arjan's patch which, using another gcc option, can move blocks marked with `unlikely()` into a separate section. Since this option can expand the code, require long-distance jumps within functions, and make stack backtraces hard to read, it is not yet clear whether it makes sense or not. Then, there is the issue of ordering the functions properly. That task will require looking at a lot of kernel profiles to be sure that some workloads won't be optimized at the expense of others. But, once these issues are taken care of, a reorganized and faster kernel will likely result. 
+
+On another front: it is generally easy to see, on a Linux system, what resources a given process is using. What's harder to find out is what the process is _not_ using because the resources are not available. As a way of giving more visibility to that side of the equation, Shailabh Nagar has been working on [a set of task delay accounting patches](<http://lwn.net/Articles/173655/>). This facility is intended for use with large-scale load management applications, but the information may be useful in other contexts as well. 
+
+This patch adds a new structure (`struct task_delay_info`) which is attached to the task structure. It contains a lock, a couple of timestamp variables, and sets of delay counters. Whenever a process goes into a delayed state (meaning, currently, waiting on a run queue, performing synchronous block I/O, or waiting for a page fault), the time is noted. At the end of the delay, when the process can run again, the system notes how much time has passed and updates a counter in the `task_delay_info` structure. Thus, over time, one can get a picture of how much time the process has spent waiting for things when it would have rather been executing. 
+
+Perhaps the most complicated part of the patch set is the netlink interface used to report delay statistics back to user space. This interface has been carefully written to be as generic as possible on the theory that it may eventually be used for other sorts of process-related reporting as well. There has been a request that some of this information, at least, also be made available through `/proc`, so that it could be easily displayed by tools like `top`. 
+
+Finally, those who worked with kernel modules in 2.4 and prior kernels will remember the `MODULE_PARM()` macro, used to define load-time parameters. This macro has been deprecated since 2004, but there are still a few hundred uses of `MODULE_PARM()` spread across several dozen files in the 2.6.16-rc kernels. These old uses came to attention recently when gcc started optimizing them out. Given the choice between making the old macro work with current gcc and simply getting rid of it, Rusty Russell [chose to get rid of it](<http://lwn.net/Articles/172767/>). This patch has not yet been merged anywhere, but it seems uncontroversial. If there are any out-of-tree modules still using `MODULE_PARM()`, updating them soon might be a good idea.

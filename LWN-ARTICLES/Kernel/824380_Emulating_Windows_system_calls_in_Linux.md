@@ -1,0 +1,38 @@
+---
+title: Emulating Windows system calls in Linux
+url: https://lwn.net/Articles/824380/
+date: "June 25, 2020"
+category: "Security-seccomp; System calls"
+author: "By Jonathan Corbet June 25, 2020"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+June 25, 2020
+
+The idea of handling system calls differently depending on the origin of each call in the process's address space is not entirely new. OpenBSD, for example, [disallows system calls entirely](<https://lwn.net/Articles/806776/>) if they are not made from the system's C library as a security-enhancing mechanism. At the end of May, Gabriel Krisman Bertazi [proposed a similar mechanism for Linux](<https://lwn.net/ml/linux-kernel/20200530055953.817666-1-krisman@collabora.com/>), but the objective was not security at all; instead, he is working to make Windows games run better under [Wine](<https://www.winehq.org/>). That involves detecting and emulating Windows system calls; this can be done through origin-based filtering, but that may not be the solution that is merged in the end. 
+
+To run with any speed at all, Wine must run Windows code directly on the CPU to the greatest extent possible. That must end, though, once the Windows program makes a system call; trapping into the Linux kernel with the intent of making a Windows system call is highly unlikely to lead to good results. Traditionally, Wine has handled this by supplying its own version of the user-space [Windows API](<https://en.wikipedia.org/wiki/Windows_API>) that implemented the required functionality using Linux system calls. As explained in the patch posting, though, Windows applications are increasingly executing system calls directly rather than going through the API; that makes Wine unable to intercept them. 
+
+The good news is that Linux provides the ability to intercept system calls in the form of [`seccomp()`](<https://www.man7.org/linux/man-pages/man2/seccomp.2.html>). The bad news is that this mechanism, as found in current kernels, is not suited to the task of intercepting only system calls made from Windows code running within a larger process. Intercepting every system call would slow things down considerably, an effect that tends to make gamers particularly cranky. Tracking which parts of a process's address space make Linux system calls and which make Windows calls within the (classic) BPF programs used by `seccomp()` would be awkward at best and, once again, would be slow. So it seems that a new mechanism is called for. 
+
+The patch set adds a new memory-protection bit for `[mmap()](<https://man7.org/linux/man-pages/man2/mmap.2.html>)` called `PROT_NOSYSCALL` which, by default, does not change the kernel's behavior. If, however, a given process has turned on the new `SECCOMP_MODE_MMAP` mode in `seccomp()`, any system calls made from memory regions marked with `PROT_NOSYSCALL` will be trapped; the handler code can then emulate the attempted system call. 
+
+The cover letter notes that one should not rely on this mechanism the way OpenBSD uses its origin verification: 
+
+It goes without saying that this is in no way a security mechanism despite being built on top of seccomp, since an evil application can always jump to a whitelisted memory region and run the syscall. This is not a concern for Wine games. 
+
+`seccomp()` is used for this non-security feature, the text continues, because the alternative would be to duplicate much of its functionality. 
+
+The patch series generated a fair amount of discussion from developers who were not entirely comfortable with this mechanism. Kees Cook, for example, [asked](<https://lwn.net/ml/linux-kernel/202005300923.B245392C@keescook/>) whether it would instead be possible to rewrite the Windows binary code at load time, replacing system calls with calls to the emulation functions. The [answer](<https://lwn.net/ml/linux-kernel/851rn0ejg9.fsf@collabora.com/>), it seems, is "no". Modifying a game's code is likely to set off checks made to defeat cheaters, who also would otherwise make code modifications of their own. Wine developer Paul Gofman [added](<https://lwn.net/ml/linux-kernel/9a512096-7707-3fc6-34ba-22f969c0f964@gmail.com/>) that, to make such changes, Wine ""would need some way to find those syscalls in the highly obfuscated dynamically generated code, the whole purpose of which is to prevent disassembling, debugging and finding things like that in it"". 
+
+Matthew Wilcox, instead, [suggested](<https://lwn.net/ml/linux-kernel/20200531164938.GF19604@bombadil.infradead.org/>) that the [`personality()`](<https://man7.org/linux/man-pages/man2/personality.2.html>) mechanism could be extended to support a Windows personality. This, essentially, would create a new system-call entry point that would emulate the Windows calls. Gofman [replied](<https://lwn.net/ml/linux-kernel/c007e3e9-e915-16f3-de31-c811ad37c44c@gmail.com/>) that this approach had been considered, but that the cost of executing the `personality()` call on each transition between Linux and Windows code would be too high. A possible solution here is to implement a special personality that looks at a flag, stored in user-space memory, to determine how system calls should be handled. Gofman [offered](<https://lwn.net/ml/linux-kernel/9c1f9db8-5680-cd1a-37aa-5f494b034825@gmail.com/>) to create a Wine patch using such a mechanism if an implementation existed; Krisman [said](<https://lwn.net/ml/linux-kernel/85367e7juc.fsf@collabora.com/>) that he would give it a try. 
+
+Andy Lutomirski had a couple of other suggestions, [the first of which](<https://lwn.net/ml/linux-kernel/079539BF-F301-47BA-AEAD-AED23275FEA1@amacapital.net/>) was a [`prctl()`](<https://www.man7.org/linux/man-pages/man2/prctl.2.html>) operation that would redirect all system calls through a user-space trampoline. System calls from the trampoline itself would be executed normally. In Wine's case, that trampoline could emulate system calls from Windows code while passing Linux system calls through to the kernel. Krisman [indicated interest](<https://lwn.net/ml/linux-kernel/87h7vhgzp1.fsf@collabora.com/>) in this approach, and may implement a version of this idea as well. 
+
+Lutomirski's [other idea](<https://lwn.net/ml/linux-kernel/CALCETrWr_B-quNckFksTP1W-Ww71uQgCrR-o9QWdQ-Gi8p1r9A@mail.gmail.com/>) was to allow a process to establish an (extended) BPF filter program for all system calls; he later [extended](<https://lwn.net/ml/linux-kernel/CALCETrW9R7YyxkervbsH2NZDUtYzag23ewD=--poeH54nc-yiQ@mail.gmail.com/>) this idea to have it handle all ""architectural privilege transitions"" for the process. This approach offers a lot of flexibility and may be useful far beyond Wine, but it suffers from a significant flaw: in the absence of unprivileged BPF, it could only be invoked by a privileged process, which is a show-stopper for Wine. Unless something changes, unprivileged BPF is [an idea that isn't going anywhere](<https://lwn.net/Articles/796328/>) in Linux, so the filter program does not look like a solution that Wine could use. 
+
+The end result of this discussion is that the problem is reasonably well understood and there is a shared desire to solve it. What form that solution will take is far from clear, though; there are a few approaches that need to be experimented with. Expect to see more patches in the future as the developers work to find which idea works best.

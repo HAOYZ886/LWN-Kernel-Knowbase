@@ -1,0 +1,36 @@
+---
+title: "Beginning the software-interrupt lock pushdown"
+url: https://lwn.net/Articles/939973/
+date: "August 4, 2023"
+category: "Interrupts-Software"
+author: "By Jonathan Corbet August 4, 2023"
+---
+
+> **Benefits for LWN subscribers**
+> 
+> The primary benefit from [subscribing to LWN](<https://lwn.net/Promo/nst-nag5/subscribe>) is helping to keep us publishing, but, beyond that, subscribers get immediate access to all site content and access to a number of extra site features. Please sign up today! 
+
+By **Jonathan Corbet**  
+August 4, 2023
+
+The big kernel lock (BKL) is a distant memory now but, for years, it was one of the more intractable problems faced by the kernel development community. The end of the BKL does not mean that the kernel is without problematic locks, however. In recent times, some attention has been paid to the software-interrupt (or "bottom half") lock, which can create latency problems, especially on realtime systems. Frederic Weisbecker is taking a new tack in his campaign to cut this lock down to size, with an approach based on how the BKL was eventually removed. 
+
+The Linux kernel was initially developed on a uniprocessor system — understandably, since that was all any of us had back then — and the code was, as a result, heavily based on the assumption that it was running on _the_ CPU and no others existed. The BKL was eventually introduced to enable Linux to run on those multiprocessor machines that, industry analysts assured us, would eventually be all the rage. It ensured that only one CPU was ever running kernel code at any given time, making all kinds of concurrency problems go away, but at a substantial performance cost, especially as the number of CPUs increased. It did not take long for the realization to sink in that the BKL had to go. 
+
+The approach that was taken in many subsystems (described more in depth in [this article](<https://lwn.net/Articles/283066/>)) was to push the BKL down into lower levels of the system. Rather than call every driver's `open()` function with the BKL held, every driver was modified to acquire the BKL itself. Then, the `open()` functions could be safely called without the BKL, and each driver could be independently audited and fixed if needed, after which its use of the BKL could be removed. This pushdown broke up a big problem into a large number of smaller, much more tractable problems. It took years, but the BKL was finally [removed](<https://lwn.net/Articles/424677/>) in 2011. 
+
+Software interrupts are a deferred-execution method for work that is urgent, but which cannot be done directly in the context of a hardware interrupt. When there is this kind of work to do, a subsystem will raise the software interrupt by setting a flag; that will cause its handler to be called at the next opportune moment, usually immediately after the completion of hardware-interrupt processing or before returning to user space from a system call. Processing can also be pushed out to a separate `ksoftirqd` thread if it starts to take too much time. See [this article](<https://lwn.net/Articles/779738/>) for a more thorough discussion of this mechanism — and of one of Weisbecker's other attempts to improve it. 
+
+There are many users of software interrupts, including tasklets, networking, the block subsystem, read-copy-update, and kernel timers. On some workloads, software-interrupt processing can be a significant part of the overall load on the CPUs; it can run for long enough to create latency problems for software running in user space. Kernel code that disables software-interrupt processing (to avoid race conditions with the handlers) becomes non-preemptible and can also cause unwanted latencies. In general, like the BKL, software interrupts reflect a design that might have been suitable decades ago, but which is problematic now. 
+
+One aspect of that design is that software-interrupt handlers exclude each other; only one can be executing on a given CPU at any time. As a result, if the block software-interrupt handler runs for a long time, the handlers for networking and timers may be indefinitely delayed. This is the case even though it is rare for software-interrupt handlers of different types to race with each other. There is no way to know for sure that running two handlers concurrently is safe, so that is not done. 
+
+Weisbecker's [patch set](<https://lwn.net/ml/linux-kernel/20230801132441.559222-1-frederic@kernel.org/>) is meant to chip away at this problem using a BKL-style pushdown in the timer subsystem. Timer functions are queued from all over the kernel; they tend to be independent and to lack concurrency problems with other software-interrupt handlers. Almost all of them could be run entirely concurrently with other software-interrupt processing — but the "almost" part is the catch. Making timer processing entirely independent of software-interrupt processing without being sure of the safety of every timer function would be a way to introduce hard-to-debug problems. 
+
+Weisbecker, instead, takes a two-step approach to introducing more concurrency to timer processing. The first is to allow individual software-interrupt vectors to be disabled without disabling software-interrupt processing entirely. The purpose of the patch set is to allow timer functions to run concurrently with other software interrupts, but they still should not run concurrently with each other. By disabling the processing of timer events (on the local CPU), the timer handler can safely re-enable software-interrupt processing without the risk of being called again. 
+
+The second step is to allow individual timer functions to inform the timer subsystem that they can be run concurrently with other software-interrupt handling. Any timer function that will not race with software-interrupt handlers, or which performs its own software-interrupt disabling where needed, can be marked by adding the `TIMER_SOFTINTERRUPTIBLE` flag when setting up its timer event. When the timer subsystem sees this flag, it will re-enable software-interrupt processing while that timer function runs. As a result, the timer function can be preempted if some more-important work comes along. 
+
+In the patch set, only one timer function, [`process_timeout()`](<https://lwn.net/ml/linux-kernel/20230801132441.559222-7-frederic@kernel.org/>) is marked in this way. Weisbecker looks forward to a day, though, ""after a few years"", when all of the kernel's timer functions have been audited and made safe to run concurrently with software-interrupt handlers; at that point, it will be possible to remove timer processing from the software-interrupt mechanism entirely. That, in turn, will be a small step toward the eventual removal of software interrupts in general. 
+
+Clearly, there is a fair amount of work needed to get to that point. Even this patch set needs ""more tweaks"" to enable interruptible timer functions to preempt other software-interrupt handlers, which is an important part of the problem. But this work could represent a step in that direction, should it find its way into the mainline. Weisbecker has made a few attempts to address software interrupts by now without a lot of success. Eventually, though, as with the BKL, the right approach will be found and a longstanding problem will, finally, be resolved.

@@ -1,0 +1,50 @@
+---
+title: "What's scheduled for sched_ext"
+url: https://lwn.net/Articles/974387/
+date: "May 23, 2024"
+category: "BPF-CPU scheduling; Scheduler-Extensible scheduler class"
+author: "By Daroc Alden May 23, 2024 LSFMM+BPF"
+---
+
+> **Benefits for LWN subscribers**
+> 
+> The primary benefit from [subscribing to LWN](<https://lwn.net/Promo/nst-nag5/subscribe>) is helping to keep us publishing, but, beyond that, subscribers get immediate access to all site content and access to a number of extra site features. Please sign up today! 
+
+By **Daroc Alden**  
+May 23, 2024
+
+* * *
+
+[LSFMM+BPF](<https://lwn.net/Articles/lsfmmbpf2024/>)
+
+David Vernet's second talk at the 2024 [Linux Storage, Filesystem, Memory Management, and BPF Summit](<https://events.linuxfoundation.org/lsfmmbpf/>) was a summary of the state of sched_ext, the extensible BPF scheduler that [LWN covered in early May](<https://lwn.net/Articles/972710/>). In short, sched_ext is intended as a platform for rapid experimentation with schedulers, and a tool to let performance-minded administrators customize the scheduler to their workload. The patch set has seen several revisions, becoming more generic and powerful over time. Vernet spoke about what has been done in the past year, and what is still missing before sched_ext can be considered pretty much complete. 
+
+#### A year of improvements
+
+Vernet opened the talk with a bit of background on sched_ext, and then went through a quick list of improvements made in the last year. First on his list was better debugging support, including hooks for dumping information about the running sched_ext scheduler to user space. He gave a demo, showing how to dump the list of tasks being managed by the scheduler and their states. He then spoke about the work done to integrate sched_ext more tightly with the CPU-frequency and scaling code. That work involved adding kfuncs to let BPF control the CPU frequency, but also improving the tracking code to make use of the current frequency when accounting how long a task ran for. The pieces are all in place now for sched_ext schedulers to implement [per-entity load tracking](<https://lwn.net/Articles/531853/>) (PELT), Vernet said. 
+
+Other improvements include some changes to the dispatch API, hotplug support, and better backward compatibility. The sched_ext code has also motivated expanding BPF's support for [kptrs](<https://lwn.net/Articles/900749/>) (pointers to kernel objects). 
+
+Vernet spoke next about the improvements to the schedulers themselves, highlighting two in particular. `scx_rusty` is a hybrid BPF/user-space scheduler; it handles load balancing and statistics in user space, with the hot-path decisions made in BPF. `scx_rusty` improves on [ the new EEVDF scheduler](<https://lwn.net/Articles/969062/>) for latency-sensitive tasks, such as gaming, by using slightly different heuristics. EEVDF uses a task's eligibility and time-slice length to determine when to schedule it. Unfortunately, slice length is not responsive to the actual workload. It can be configured by an administrator, but often isn't, particularly because it can often be hard to tell what slice length is appropriate for a workload. `scx_rusty` uses the length of time for which a task actually ran, instead of its static slice length, which lets it schedule tasks that only run for a short time before blocking more frequently than tasks that use their whole time quantum. The scheduler also considers whether the task often blocks waiting for other tasks (indicating a consumer), wakes other tasks (indicating a producer), or both (indicating the middle of a pipeline). It factors this information in to the virtual deadline calculated for the task, slightly prioritizing tasks that block frequently, and greatly prioritizing tasks that wake other threads. 
+
+These improvements combine to make `scx_rusty` noticeably more performant for games. Vernet showed another demo of a game experiencing lag under EEVDF, which immediately disappears upon enabling `scx_rusty`. Normally, interactivity is a tradeoff against throughput. Vernet claimed that `scx_rusty` actually _also_ has slightly better throughput than EEVDF, but didn't cite specific numbers. 
+
+The other scheduler Vernet highlighted was `scx_layered`, a statically-configured scheduler. Users can sort processes into "layers" by factors like the name of the executable, the process's control group, or other metadata. Each layer can then be statically configured with different properties. He said that Meta uses the scheduler for a lot of web workloads, where the ability to have fine-grained control over scheduling was valuable. 
+
+There are other sched_ext schedulers in active development, including `scx_lavd`, a scheduler designed specifically for the Steam Deck, and `scx_rustland`, which delegates scheduling decisions to user space. Since last year, many of the sched_ext schedulers were moved into [ a separate GitHub repository](<https://github.com/sched-ext/scx>) from [ the main sched_ext code](<https://github.com/sched-ext/sched_ext>). Vernet said the scheduler repository was intended to have a low barrier to entry, calling for people to "submit your scheduler, do whatever", hopefully leading to an exchange of ideas. The repository also has some helpful libraries and Rust crates for writing schedulers. Vernet was careful to point out that the schedulers moved to the separate repository remain GPLv2 licensed, even if they are no longer intended to become part of the kernel sources — and, in fact, the BPF verifier refuses to load code that does not claim to be GPLv2-licensed. 
+
+#### What's coming
+
+Vernet then turned to what remains to be done. "It's incredible what you can do in schedulers already," but there are still areas to work on, he said. Some examples of rough edges right now include the facts that BPF programs can't hold a spinlock around a kernel function call, nested structures that contain pointers to kernel objects confuse the verifier, and BPF programs still have an incredibly small stack size (512 bytes), which is sometimes hard to work around. He also commented that it would be nice if the build system could be made to produce bindings that are more amenable to safe backward compatibility. 
+
+Despite that, Vernet called the situation on the BPF side "really really encouraging," and said that the most helpful thing people could do at this point would be to improve existing schedulers, particularly adding tests. He also highlighted a few different areas of upcoming work, including restructuring things so that a scheduler can be attached to a specific control group. That is one use case for larger BPF stacks, because it means that schedulers could be called recursively (since control groups can be nested). Another upcoming item is managing idle policies — currently, these are managed separately from the scheduler, but Vernet is "not convinced that they should be". All of the recent improvements have had some spillover benefits, as well. The recent cpufreq tuning has uncovered bottlenecks elsewhere in the code, and the sched_ext work has motivated other improvements to BPF that are likely to be useful elsewhere. 
+
+Vernet concluded by asking people to join the conversation on the mailing list if sched_ext was useful to them, noting that it will be the users who ultimately cause the feature to be merged. At that point, discussion opened up more widely, with several people having questions about Vernet's summary. 
+
+One audience member asked what Vernet was working on next in terms of core BPF programs. He responded with two main items: stack allocation ([`alloca()`](<https://man7.org/linux/man-pages/man3/alloca.3.html>)) for BPF programs, and making it possible to attach `struct_ops` programs to a control group, instead of having them all be global. Vernet also intends to make small usability improvements wherever possible. He called out holding a spinlock around a call to a kfunc as an example, saying that this is what prevents people from implementing EEVDF in sched_ext for rapid experimentation. 
+
+Another participant asked what Vernet thought about tail-end latency (how long the longest operations take) versus generic latency (how long operations take on average), and whether that presented any areas for scheduler improvement. Vernet clarified that for gaming, people mostly care about tail latency. `scx_rusty`, the scheduler he demonstrated, reduces the time slices it gives out when the system is overloaded in order to help with that. But Vernet doesn't think that improving tail-end latency needs to come at the expense of generic latency or vice versa: "I think we could get a win on every front." The audience member was skeptical about that, saying that existing schedulers have a lot of optimization put into them. Vernet remained optimistic, however, saying that EEVDF is relatively new, and therefore there may still be places to make improvements. 
+
+A third audience member noted that they had looked at running EEVDF on Chromebooks for the upcoming [Power Management and Scheduling in the Linux Kernel](<https://retis.sssup.it/ospm-summit/>) (OSPM) conference, and had seen a big reduction in tail latency. Vernet asked what version of the kernel that was, to which the audience member responded that they had actually backported EEVDF to 5.15 and disabled the eligibility checks. Vernet replied that EEVDF's eligibility mechanism hurts the latency of the system, but without it the scheduler doesn't actually bound lag. He continued to say that ideally the perfect scheduler would adapt to what the system is actually doing. 
+
+Sched_ext has continued improving, becoming increasingly tempting for workloads that have been less well-served by traditional schedulers, but there remain some bumps in the road before it becomes as useful as it could be. Minor BPF improvements will open up much more flexibility for future schedulers, but the big remaining obstacle is getting the code merged at all — even though the topic was hardly touched on.

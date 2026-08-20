@@ -1,0 +1,75 @@
+---
+title: "The rise of Linux-based networking hardware"
+url: https://lwn.net/Articles/720313/
+date: "April 19, 2017"
+category: Networking
+author: "April 19, 2017 This article was contributed by Antoine Beaupré Netconf/Netdev"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+April 19, 2017
+
+This article was contributed by Antoine Beaupré
+
+* * *
+
+[Netconf/Netdev](<https://lwn.net/Archives/ConferenceByYear/#2017-NetconfNetdev>)
+
+Linux usage in networking hardware has been on the rise for some time. During the latest [Netdev conference](<http://netdevconf.org/2.1/>) held in Montreal this April, people talked seriously about Linux running on high end, "top of rack" (TOR) networking equipment. Those devices have long been the realm of proprietary hardware and software companies like Cisco or Juniper, but Linux seems to be making some significant headway into the domain. According to Shrijeet Mukherjee, VP of Engineering at Cumulus Networks: "we are seeing a 28% adoption rate in the Fortune 50" companies. 
+
+As someone who has worked in system administration and networking for over a decade, I was surprised by this: switches have always been black boxes of proprietary hardware that we barely get a shell into. But as more and more TOR hardware gets Linux support, some of that work trickles down outside of that niche. Are we really seeing the rise of Linux in high-end networking hardware?
+
+#### Linux as the standard interface
+
+During [his keynote](<http://netdevconf.org/2.1/news.html?news-brandeburg-keynote>) at Netdev, Jesse Brandeburg explained that traffic is exploding on the Internet: "From 2006 to 2016 the compound annual growth rate was 78% of network traffic. So the network traffic is growing like crazy. In 2010 to 2023, it's going to grow by a thousand times." 
+
+He also mentioned Intel was working on devices that could do up to 400 Gbps. In his talk, he argued that Linux has a critical place in the modern world by repeating the mantra that "everything is on the network, and the network runs Linux", but does it really? Through Android, Linux has become the most popular end-user device operating system and is also dominant on the server — but what about the actual fabric of the network: the routers and switches that interconnect all those machines?
+
+Mukherjee, in his own [keynote](<http://netdevconf.org/2.1/session.html?mukherjee>), argued that even though Linux has achieved dominance in the server and virtualization markets, there is a "discontinuity [...] at the boundary where the host and the network meet" and argued "that the host without the network will not survive". In other words, proprietary hardware and software in the network threaten free software in the server. Even though some manufacturers are already providing a "Linux interface" in their hardware, it is often only some sort of compatibility shell which might be compared with the [Ubuntu compatibility layer in Windows](<https://lwn.net/Articles/681768/>): it's not a real Linux.
+
+Mukherjee pushed this idea further by saying that those companies are limiting themselves by not using the full Linux stack. He presented Linux as the "top vehicle for innovation" that provides a featureful network stack, citing VXLAN, eBPF, and Quagga as prime features used on switches. Mukherjee also praised the diversity of the user-space Linux ecosystem as something that commercial alternatives can't rival; he compared the faster Linux development to the commercial sector where similar top features stay in the beta stage for up to 3 years. 
+
+Because of its dominance in the server market, consumers are expecting a Linux-like interface on their networking gear now, which means Linux could be the standard interface all providers strive toward. As a Debian developer, I can't help but smile at the thought; if there's one thing we have _not_ been able to do among Linux distributions, it's pretty much standardize user space in a consistent interface. POSIX is old and incomplete, the [FHS](<https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard>) is showing its age, and most distributions have abandoned [LSB](<https://en.wikipedia.org/wiki/Linux_Standard_Base>). Yet, the idea is certainly enticing: there is a base set of tools and applications, especially for the Linux kernel, that _are_ standardized: `iproute2`, `ethtool`, and `iptables` are generally consistent across distributions, even though each distribution has its own way of using them.
+
+Yet Linux is not dominant, why? Mukherjee identified the problem as "packaging issues" and listed a set of features he would like Linux to improve:
+
+  * _Standardization of the`ethtool` interface_. The idea is to make `ethtool` a de-facto standard to manage switches and ports. Mukherjee gave the example that data centers spend more money on cables than any other hardware and explained that making it easier to identify cables is therefore a key functionality. Getting consistent interface naming was also a key problem identified by numerous participants at the conference. While systemd tried to fix this with the [predictable network interface names](<https://www.freedesktop.org/wiki/Software/systemd/PredictableNetworkInterfaceNames/>) specification, the interface names are not necessarily predictable across virtual machines or on special hardware; in fact, this was the topic of the [first talk of the conference](<http://netdevconf.org/2.1/session.html?hemminger>). `ethtool` also needs to support interfaces that run faster than 1 Gbps, something that still has limited support in Linux at the moment.
+
+  * _Scaling of the Linux bridge_. Through the rise of "software defined networking", we are likely to see multi-switch virtual environments that need to scale to hundreds of interfaces and devices easily. This is something the Linux bridge was never designed to do and it's showing scalability issues. During the conference, there was hope that the [new XDP and eBPF developments](<https://lwn.net/Articles/719850/>) could help, but also concerns this would create yet another bridge layer inside the kernel.
+
+Cumulus's goal seems to be to establish Linux as the industry standard for this new era of networking and it is not alone. Through its [Open Compute project](<http://opencompute.org/>), Facebook is sharing open designs of data center products and, while we have yet to see commercial off-the-shelf (COTS) 24 and 48-port gigabit switches trickle down to the consumer market, the company is definitely deploying new hardware based on those specifications in its own data centers, and those devices are often based on Linux.
+
+#### The Linux switch implementation
+
+So how exactly do switches work in Linux?
+
+The Linux kernel manipulates switches with three different operation structures: `switchdev_ops`, which we [previously covered](<https://lwn.net/Articles/675826/>), `ethtool_ops`, and `netdev_ops`. Certain switches, however, also need [distributed switch architecture (DSA)](<https://www.kernel.org/doc/Documentation/networking/dsa/dsa.txt>) features to be properly handled. DSA is a more obscure part of the network stack that allows Linux to represent hardware switches or chains of switches using regular Linux tools like `bridge`, `ifconfig`, and so on. While switchdev is a new layer, DSA has been in the kernel [since 2.6.28](<https://lwn.net/Articles/302333/>) in 2008. Originally developed to support Marvell switches, DSA is now a generic layer deployed in WiFi access points, set-top boxes, on-board flight entertainment systems, trains, and other industrial equipment. Switches that have an Ethernet controller need DSA, whereas the kernel can support switches without Ethernet controllers directly with switchdev drivers.
+
+The first years of DSA's development consisted only of basic maintenance but, in the last three years, DSA has seen a resurgence of contributions, as part of Linux networking push to support hardware offloading and network switches. Between 2014 and 2015, DSA added support for Broadcom hardware, wake on LAN, and hardware port bridging, among other features.
+
+DSA's development was parallel to [swconfig](<https://wiki.openwrt.org/doc/techref/swconfig>), written by the [OpenWrt](<https://openwrt.org/>) project to support the small office and home office (SOHO) routers that the project is targeting. The main difference between swconfig and DSA is that DSA-supported switches show one network interface per port, whereas swconfig-configured switches show up as a single port, which limits the amount of information that can be extracted from the switch. For example, you cannot have per-port traffic statistics with swconfig. That limitation is what led to the creation of the switchdev framework, when swconfig was [proposed](<https://lwn.net/Articles/571390/>) (then refused) for inclusion in mainline. Another goal of switchdev was to support bridge hardware offloading and network interface card (NIC) virtualization.
+
+Also, whereas swconfig uses [virtual LAN (VLAN)](<https://en.wikipedia.org/wiki/Virtual_LAN>) tagging to address ports, DSA enables the use of device-specific tagging headers to address different ports, which enables DSA to have better control over the switches. This allows, for example, DSA to do [internet group management protocol (IGMP)](<https://en.wikipedia.org/wiki/Internet_Group_Management_Protocol>) snooping or implement the [spanning tree protocol](<https://en.wikipedia.org/wiki/Spanning_Tree_Protocol>), whereas swconfig doesn't have those features. Some switches are actually connected to the host CPU through an Ethernet interface instead of regular PCI-Express interface, and DSA supports this as well.
+
+One advantage that remains in the swconfig approach is that it treats the internal switch as a simple external switch, and addresses ports with standard VLAN tags. This is something DSA could do, as well, but no one has bothered implementing this just yet. For now, DSA drivers use device-specific tagging mechanisms that limit the number of supported devices. Other areas of future improvement for DSA are better multi-chip support, IGMP snooping, and bonding, as well as firewall, NAT, and TC offloading.
+
+#### Where is the freedom?
+
+Given all those technical improvements, you might rightfully wonder if your own wireless router or data center switch runs Linux.
+
+In recent years, we have seen more and more networking devices shipped with Linux and sometimes even OpenWrt (e.g. in the case of the Turris Omnia, which we [previously covered](<https://lwn.net/Articles/705051/>)), and especially on SOHO routers, but it sometimes means a crippled operating system that only offers you a proprietary web interface. But at least those efforts make it easier to deploy free operating systems on those devices.
+
+Based on my experience running OpenWrt on wireless routers to build the [Montreal mesh network](<https://wiki.reseaulibre.ca/>), deploying Linux on routers and switches has always been a manual process. The Ubiquiti hardware being used in the mesh network comes with an OpenWrt derivative, but it includes proprietary drivers and a proprietary web interface. To use the mesh networking protocol that was chosen, it was necessary to deploy custom OpenWrt images by hand. For years, it was a continuous struggle for OpenWrt developers to liberate generation after generation of proprietary hardware with companies like Cisco locking down the venerable WRT platform in 2006 and the US Federal Communications Commission (FCC) rules that forced TP-Link to [block free software on its routers](<https://lwn.net/Articles/679801/>), a change that was [later reverted](<https://lwn.net/Articles/695994/>).
+
+Most hardware providers are obviously not dedicated to software freedom: deploying Linux on their hardware is for them an economic, not political choice. As you might expect, a "Linux router" these days often means a closed device and operating system, using Linux as the only free component. I had the privilege of doing some reverse engineering on the SmartRG SR603n VDSL modem, which also doubles as a WiFi router and VoIP phone adapter. I was able to get a shell on that machine, and what I found was a custom operating system built on top of the Linux kernel. I [wrote a detailed report about this](<https://anarc.at/blog/2015-10-20-smartrg-sr630n-proprietary-router-running-linux/>) two years ago and the situation then was pretty grim.
+
+Another experience I had was working over a decade in data centers, which tells an even worse story: most switches and routers there are not running free software at all. We have deployed HP ProCurve switches that provide free (as in beer) software updates and have struggled for years to find free (as in speech) software alternatives for those. We built our own routers using COTS server hardware, at a significant performance cost over the dedicated application-specific integrated circuits (ASICs) built into commercial routers, which do not offer us the trust and flexibility we were looking for.
+
+But Linux is definitely making some headway, and has been for a while. When we covered switchdev in February 2016, it was just getting started, but now vendors like Mellanox, Broadcom, Cumulus, and Intel are writing and shipping code using the framework. Cumulus, in particular, is developing a Debian-based distribution ([Cumulus Linux](<https://wiki.debian.org/Derivatives/Census/CumulusLinux>)) that it deploys for clients on [targeted hardware](<https://cumulusnetworks.com/products/hardware-compatibility-list/>). Most of the hardware in that list, however, is not actually open in the more radical sense: they are devices that can run free software but are not generally [open-source hardware](<https://en.wikipedia.org/wiki/Open-source_hardware>). There are some exceptions, but they sit at the higher end of the spectrum: most organizations probably don't need a 100 Gbps ports, let alone the 128 ports in the [Backpack switch](<https://cumulusnetworks.com/about/press-releases/detail/20170124-backpack-modular-switch-platform-available-to-order-from-cumulus-networks/>) that Cumulus is shipping.
+
+How much this translates to actual freedom for the end-user is therefore questionable. While I have seen encouraging progress on the high end of the hardware spectrum at Netdev, I'm not sure this will translate into immediate wins in the data center or even for home users in the short term. In the long term, however, we will hopefully see some progress in Linux's rise in general-purpose networking hardware following its dominance in general-purpose computing.
+
+[The author would like to thank the Netdev organizers for travel assistance. Also, thanks to Andrew Lunn for a technical review of this article.]

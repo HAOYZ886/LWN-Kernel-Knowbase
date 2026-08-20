@@ -1,0 +1,51 @@
+---
+title: HWPOISON
+url: https://lwn.net/Articles/348886/
+date: "August 26, 2009"
+category: Fault tolerance; HWPOISON
+author: "August 26, 2009 This article was contributed by Jon Ashburn"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+August 26, 2009
+
+This article was contributed by Jon Ashburn
+
+One downside to the ever-increasing memory size available on computers is an increase in memory failures. As memory density increases, error rates also rise. To offset this increased error rate, recent processors have included support for "poisoned" memory, an adaptive method for flagging and recovering from memory errors. The HWPOISON patch recently developed by Andi Kleen and Fengguang Wu provides the Linux kernel support for memory poisoning. Thus, when HWPOISON is coupled with the appropriate fault-tolerant processors, Linux users can enjoy systems that are more tolerant to memory errors in spite of increased memory densities.
+
+Memory errors are classified as either soft (transient) or hard (permanent). In soft errors, cosmic rays or random errors can toggle the state of a bit in a SRAM or DRAM memory cell. In hard errors, memory cells become physically degraded. Hardware can detect - and automatically correct - some of these errors via Error Correcting Codes (ECC). While single bit data errors can be corrected via ECC, multi-bit data errors cannot. For these uncorrectable errors, the hardware typically generates a trap which, in turn, causes a kernel panic.
+
+The blanket action of crashing the machine for all uncorrected soft and hard memory errors is sometimes over-reactive. If the detected memory error never actually corrupts executing software, then ignoring or isolating the error is the most desirable action. Memory "poisoning", with its delayed handling of errors, allows for a more graceful recovery from and isolation of uncorrected memory errors rather than just crashing the system. However, memory poisoning requires both hardware and kernel support.
+
+The [HWPOISON patch](<http://lwn.net/Articles/345340/>) is very timely: Intel's recent preview of its Xeon processor (codenamed Nehalem-EX) promises support for memory poisoning. Intel has included its Machine Check Abort (MCA) Recovery architecture in Nehalem-EX. Originally developed for ia64 processors, Intel's MCA Recovery architecture supports memory poisoning and various other hardware failure recovery mechanisms. While, HWPOISON adopted Intel's usage of the term "poisoning", this should not be confused with the unrelated Linux kernel concept of poisoning: writing a pattern to memory to catch uninitialized memory.
+
+While the specifics of how hardware and the kernel might implement memory poisoning varies, the general concept is as follows. First, hardware detects an uncorrectable error from memory transfers into the system cache or on the system bus. Alternatively, memory may be occasionally "scrubbed." That is, a background process may initiate an ECC check on one or more memory pages. In either case, the hardware doesn't immediately cause a machine check but rather flags the data unit as poisoned until read (or consumed). Later, when erroneous data is read by executing software, a machine check is initiated. If the erroneous data is never read, no machine check is necessary. For example, a modified cache line written back to main memory may have a data word error that is marked as poisoned. Once the poisoned data is actually used (loaded into a processor register, etc.), a machine check occurs, but not before. Thus, any poisoning machine check event may happen long after the corresponding data error event.
+
+HWPOISON is a poisoned data handler invoked by the low-level Linux machine check code. Where possible, HWPOISON attempts to gracefully recover from memory errors, and contain faulty hardware to prevent future errors. At first glance, an obvious solution for the poison handler would focus on the specific process and memory address(es) associated with the data error. However, this is infeasible for two reasons. First, the offending instruction and process cannot be determined due to delays between the data error consumption and execution of the poison handler. These delays include asynchronous hardware reporting of the machine check event, and delayed execution of the handler via a workqueue. Thus, a different process may be executing by the time the HWPOISON handler is ready to act. Second, bad-memory containment must be done at a level where the kernel actually manages memory. Thus, HWPOISON focuses on memory containment at the page granularity rather than the low granularity supported by Intel's MCA Recovery hardware.
+
+HWPOISON finds the page containing the poisoned data and attempts to isolate this page from further use. Potentially corrupted processes can then be located by finding all processes that have the corrupted page mapped. HWPOISON performs a variety of different actions. Its exact behavior depends upon the type of corrupted page and various kernel configuration parameters. 
+
+To enable the HWPOISON handler, the kernel configuration parameter `MEMORY_FAILURE` must be set. Otherwise, hardware poisoning will cause a system panic. Additionally, the architecture must support data poisoning. As of this writing, HWPOISON is enabled for all architectures to make testing on any machine possible via a user-mode fault injector, which is detailed below.
+
+The handler must allow for multiple poisoning events occurring in a short time window. HWPOISON uses a bit in the `flags` field of a `struct page` to mark and lock a page as poisoned. Since page flags are currently in short supply, this choice was not made without consternation and debate by kernel hackers. See [this LWN article](<http://lwn.net/Articles/335768/>) for further details about this issue. In any case, this bit allows previously poisoned pages to be ignored by the handler.
+
+The handler ignores the following types of pages: 1) pages that have been previously poisoned, 2) pages that are outside of kernel control (an invalid page frame number), 3) reserved kernel pages, and 4) pages with usage count of zero, which implies either a free or higher order kernel page. The poisoned bit in the flags field serves as a lock allowing rapid-fire poisoning machine checks on the same page to be handled only once by ignoring subsequent calls to the handler. Reserved kernel pages and zero count pages are ignored with the peril of a system panic. However, these pages containing critical kernel data cannot be isolated. Thus, HWPOISON has no useful options for recovery. 
+
+In addition to ignoring pages, possible HWPOISON actions include recovery, delay, and failure. Recovery means HWPOISON took action to isolate a page. Ignore, failure, and delay are all similar in that the page was not completely isolated, except for flagging the page as poisoned. With delay, handling can be safely postponed until a later time when the page might be referenced. By delaying, some transient errors may not reoccur or may be irrelevant. HWPOISON delays any action on kernel slab or buddy allocator pages or free pages. With failure, HWPOISON could, but does not support handling the page. HWPOISON takes an action of failure on unknown or huge pages. Huge pages fail since reverse mapping is not supported to identify the process which owns the page. 
+
+Clean pages in either the swap or page cache can be easily recovered by invalidating the cache entry for these pages. Since these pages have a duplicate backing copy on disk, the in-memory cache copy can be invalidated. Unlike clean pages, dirty pages in these caches have differences between the memory and disk copies. Thus, poisoned dirty pages may have important data corruption. However, dirty pages in the page cache are recovered by invalidation of the cache. Additionally, a page error is set for the dirty page cache page so subsequent user system calls on the file associated with the page will return an I/O error. Dirty pages in the swap cache are handled in a delayed fashion. The dirty flag is cleared for the page and the page swap cache entry is maintained. On a later page fault the associated application will be killed.
+
+To recover from poisoned, user-mapped pages, HWPOISON first finds all user processes which mapped the corrupted page. For clean pages with backing store, HWPOISON need not take recovery action since the process does not need to be killed. Dirty pages are unmapped from all associated processes, which are subsequently killed. Two VM `sysctl` parameters are supported by HWPOISON with respect to killing user processes: `vm.memory_failure_early_kill` and `vm.memory_failure_recovery`. Setting the `vm.memory_failure_early_kill` parameter causes an immediate SIGBUS to be sent to the user process(es). The kill is done using a catchable SIGBUS with BUS_MCEERR_AO. Thus, processes can decide how they want to handle the data poisoning. The `vm.memory_failure_recovery` parameter delays the killing: the page is merely unmapped by HWPOISON. When this unmapped page is actually referenced at a later time then a SIGBUS will be sent.
+
+An HWPOISON patch git repository is available at 
+
+```
+git://git.kernel.org/pub/scm/linux/kernel/git/ak/linux-mce-2.6.git hwpoison
+```
+
+Since faulty hardware that supports data poisoning is not easy to come by, a fault injection test harness `mm/hwpoison-inject.c` has also been developed. This simple harness uses debugfs to allow failures at an arbitrary page to be injected.
+
+While HWPOISON was developed for x86-based machines, interest has been expressed by supporters of other Linux server architectures, such as ia64 and sparc (discussed [ here](<http://lkml.org/lkml/2009/8/5/274>)). Thus, the patch may proliferate on future Linux server distributions, allowing users of future Linux servers to enjoy increased fault tolerance. Now that Intel is supporting MCA Recovery on x86 machines, some desktop users may also enjoy its benefits in the near future.

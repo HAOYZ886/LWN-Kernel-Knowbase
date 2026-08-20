@@ -1,0 +1,104 @@
+---
+title: The runtime verification subsystem
+url: https://lwn.net/Articles/857862/
+date: "June 7, 2021"
+category: "Development tools-Testing; Realtime"
+author: "By Jonathan Corbet June 7, 2021"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+June 7, 2021
+
+The realtime project has been the source of many of the innovations that have found their way into the core kernel in the last fifteen years or so. There is more to it than that, though; the wider realtime community is also doing interesting work in a number of areas that go beyond ensuring deterministic response. One example is Daniel Bristot de Oliveira's [runtime verification patch set](<https://lwn.net/ml/linux-kernel/cover.1621414942.git.bristot@redhat.com/>), which can monitor the kernel to ensure that it is behaving the way one thinks it should. 
+
+Realtime development in the kernel community is a pragmatic effort to add determinism to a production system, but there is also an active academic community focused on realtime work. Academic developers often struggle to collaborate effectively with projects like the kernel, where concerns about performance, regressions, and maintainability have been the downfall of many a bright idea. As a result, there is a lot of good academic work that takes a long time to make it into a production system, if it ever does. 
+
+Imagine, for a moment, a project to create a realtime system that absolutely cannot be allowed to fail; examples might include a controller for a nuclear reactor, a jetliner's flight-control system, or the image processor in a television set showing that important football game. In such a setting, it is nice to know that the system will always respond to events within the budgeted time. Simply observing that it _seems_ to do so tends to be considered inadequate for these systems. 
+
+One way to get to a higher level of assurance is to create a formal model of the system, prove mathematically that the model produces the desired results, then run that model with every scenario that can be imagined. This approach can work, but it has its difficulties: ensuring that the model properly matches the real system is a challenge in its own right and, even if the model is perfect, it is almost certain to be far too slow for any sort of exhaustive testing. The complexity of real-world systems makes this approach impractical, at best. 
+
+#### Runtime verification
+
+The runtime verification patches take a different approach. Developers can create a high-level model describing the states that the system can be in and the transitions that occur in response to events. The verification code will then watch the kernel to ensure that the system does, indeed, behave as expected. If a discrepancy is found in a running system, then there is either an error in the model or a bug in the system; either way, fixing it will improve confidence that the system is behaving correctly. 
+
+The use of this mechanism is described in [this documentation patch](<https://lwn.net/ml/linux-kernel/49959c04157ecf7e972551555533b08d70d57bd7.1621414942.git.bristot@redhat.com/>) helpfully included with the code; the following example is shamelessly stolen from there. The first step is to express one's model of an aspect of the system's behavior; the example given is whether a CPU can be preempted or not — a question that realtime researchers tend to be interested in. This model is described in the [DOT language](<https://graphviz.org/doc/info/lang.html>), making it easy to use [Graphviz](<https://graphviz.org/>) to view the result: 
+
+> ![\[Graphviz output\]](https://static.lwn.net/images/2021/rv-wip.svg)
+
+In the preemptive state, a CPU can be preempted by a higher-priority task. The preempt_disable event will put the CPU into the non_preemptive state where that can no longer happen; preempt_enable returns the CPU to the preemptive state. A sched_waking event while in the non_preemptive state will cause the CPU to remain in that state. 
+
+Pretty graph plots can dress up an academic paper (or an LWN article), but they are of limited utility when it comes to verifying whether the kernel actually behaves as described in that model. That might change, though, if this model could be used to generate code that _can_ help with this verification. Part of the patch set is the [dot2k tool](<https://lwn.net/ml/linux-kernel/e569772b0324d425619f10b2dab3c8dde2fc68b7.1621414942.git.bristot@redhat.com/>), which will read the DOT description and output a set of template code that may be used for actual verification. There is, however, some work that must be done to connect that result to the kernel. 
+
+#### Connecting the model to the kernel
+
+As a starting point, the template code generated by `dot2k` contains definitions of the states and events described in the model: 
+
+> 
+
+```
+>     enum states {
+>         preemptive = 0,
+>         non_preemptive,
+>         state_max
+>     };
+>
+```
+
+> 
+> | 
+
+```
+>     enum events {
+>         preempt_disable = 0,
+>         preempt_enable,
+>         sched_waking,
+>         event_max
+>     };
+>
+```
+  
+>   
+> ---|---  
+  
+From these, a state machine is built to match the model. Also included are stub functions that will be called in the kernel when one of the defined events occurs; for example, the preempt_disable event is given this stub: 
+
+```
+void handle_preempt_disable(void *data, /* XXX: fill header */)
+        {
+    	da_handle_event_wip(preempt_disable);
+        }
+```
+
+The developer's job is to complete the prototype of the function to match how it will be called. That, in turn, depends on how it will be hooked into a running kernel. There is a fair amount of flexibility here; just about anything that will cause the kernel to call the function in response to the relevant event is fair game. The most common case, though, seems likely to be tracepoints, which already exist to mark the occurrence of events of interest. The kernel conveniently provides a tracepoint that fires when preemption is disabled; its name is, boringly, "preemption_disable", and it provides two parameters beyond the standard tracepoint data called `ip` and `parent_ip`. If our `handle_preempt_disable()` function is to be hooked to that tracepoint, its prototype must thus be: 
+
+```
+void handle_preempt_disable(void *data, unsigned long ip, unsigned long parent_ip);
+```
+
+Any other stubs must be fixed up in the same way. Then, the developer must arrange for the connection between the handler functions and their respective tracepoints; the template provided by dot2k makes that easy: 
+
+```
+#define NR_TP   3
+        struct tracepoint_hook_helper tracepoints_to_hook[NR_TP] = {
+            {
+    	    .probe = handle_preempt_disable,
+    	    .name = /* XXX: tracepoint name here */,
+    	    .registered = 0
+        	},
+        	/* ... */
+        };
+```
+
+By filling in the names of the relevant tracepoints, the developer can make the connection to the handler functions. The template also provides functions that are used to start and stop the model, for cases where any sort of extra initialization or cleanup is required. Those functions need no modification for this simple model. Finally, dot2k generates a pair of tracepoints that can be used to watch for events and errors from the model. 
+
+#### Running the model
+
+The resulting code is then built into the kernel, most likely as a loadable module. In a kernel with runtime verification enabled, there will be a new directory (called `rv`) in `/sys/kernel/tracing` with a set of control files; these can be used to turn specific models on or off. It is also possible to configure "reactors", which perform some action when the system's behavior diverges from what the model says should happen. The default is to do nothing, though the "error" tracepoint will fire in that case. Alternatives include logging a message with `printk()`, and panicking the system for those cases when somebody is especially unhappy that the system misbehaved. 
+
+Realtime researchers can use this mechanism to check that their models of the kernel's behavior match the reality. But it is not hard to imagine that runtime verification could have much broader applicability than that. It could be used to monitor the security of the system, ensuring that, for example, no process enters a privileged state in unexpected places. Regression testing is another obvious application; a suitably well-developed model of various kernel subsystems might be able to catch subtle bugs before they become visible at the user level. The use of DOT to define the models makes it easy to use them as documentation describing the expected behavior of the kernel as well. 
+
+The first step, though, would be to get this subsystem into the kernel. So far, there have not been many comments posted in response to this work, so it is unlikely to have seen a lot of review. As an add-on that should not bother anybody who is not using it, runtime verification should have a relatively low bar to get over, so it is not entirely fanciful to imagine that this work could be merged. Then there could be some interesting applications of it that come out of the woodwork.

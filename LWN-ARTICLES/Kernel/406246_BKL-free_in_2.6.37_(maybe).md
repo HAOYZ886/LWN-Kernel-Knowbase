@@ -1,0 +1,32 @@
+---
+title: "BKL-free in 2.6.37 (maybe)"
+url: https://lwn.net/Articles/406246/
+date: "September 20, 2010"
+category: Big kernel lock; lock kernel
+author: "By Jonathan Corbet September 20, 2010"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+By **Jonathan Corbet**  
+September 20, 2010
+
+The removal of the big kernel lock has been an ongoing, multi-year effort which has been reported on here a few times. The BKL has some strange and unique properties which make its removal from various kernel subsystems trickier than one might think it should be. But, thanks to a great deal of work by Arnd Bergmann, we might just be approaching a point where the 2.6.37 kernel can be built BKL-free for many or most users. There is, however, one significant obstacle which still must be overcome. 
+
+Arnd currently has a vast array of patches in the linux-next tree. Many of them are the result of the tedious (but tricky) work of looking at specific subsystems, determining what kind of locking they really need to have, then substituting `lock_kernel()` calls with something more local. In many cases, the BKL locking can simply be removed, as the code turns out not to need it. A big focus for 2.6.37 has been the removal of the BKL from a number of filesystems - a task which has required digging into some fairly old code. The Amiga FFS, for example, cannot have received much maintenance in recent times, and seems unlikely to have a lot of users. 
+
+The most wide-ranging patch for 2.6.37 has to do with the `llseek()` function, found in `struct file_operations`. This function allows a filesystem or driver to implement the `lseek()` system call, changing a file descriptor's position within the file. Unlike most `file_operations` functions, there is a default implementation for `llseek()` which simply changes the kernel's idea of the descriptor's position without notifying the underlying code at all. That change, naturally, was done with the BKL held. This implicit default `llseek()` implementation will have made life easier for a handful of developers, but it makes BKL removal hard: an implementation change could affect _any_ code with a `file_operations` structure, not just modules which actually implement the `llseek()` operation. 
+
+To make things harder, a great many of these implicit `llseek()` implementations are not really needed or useful - most device drivers do not implement any concept of a "file position" and pay no attention to whatever the kernel thinks the position might be. In such situations, it is tempting to change the code to an explicit "no seeking allowed" implementation which reflects what is really going on. The problem here is that some user-space application somewhere might be calling `lseek()` on the device, and they might get upset if those calls started failing with `ESPIPE` errors. In other words, a successful-but-ignored `lseek()` call might just be part of the user-space ABI for a specific device. So something more careful has to be done. 
+
+The first step was to go through the kernel and add an explicit `llseek()` operation to every `file_operations` structure which did not already have one - a patch affecting 343 files. This work was done primarily with a frightening Coccinelle semantic patch (it was included in [the patch changelog](<http://permalink.gmane.org/gmane.linux.kernel/1036078>)) which attempts to determine whether the code in question actually uses the file position or not. If the file position is used, `default_llseek()`, which implements the old default behavior, becomes the explicit default; otherwise `noop_llseek()`, which succeeds but does nothing, is used. After that work was done, Arnd was able to verify that none of the users of `default_llseek()` (there are 191 of them) needs the BKL. So the removal of the BKL from `llseek()` can be made complete. 
+
+The patch also changes how `llseek()` is handled in the core kernel. Starting with 2.6.37, assuming this work is merged (a good bet), any code which fails to provide an `llseek()` operation will default to `no_llseek()`, which returns `ESPIPE`. Any out-of-tree code which depends on the old default will thus not work properly with 2.6.37 until it is updated. 
+
+Even after all of this work, there are still a lot of `lock_kernel()` calls in the mainline. Almost all of them, though, are in old, obscure code which is not relevant to a lot of users. In some cases, the remaining BKL-using code might be shifted over to the staging tree and eventually removed entirely if it is not fixed up. In other cases, an effort will be made to eradicate the BKL; it can still be found in occasionally-useful code like the Appletalk and ncpfs implementations. There are also a lot of Video4Linux2 drivers which still use the BKL; how those drivers will be fixed is the subject of [an ongoing discussion](<https://lwn.net/Articles/406262/>) in the V4L2 community. 
+
+The biggest impediment to a BKL-free 2.6.37, though, may well be the POSIX locking code. File locks are represented internally with a `file_lock` structure; those structures are passed around to a few places and, of course, protected with the BKL. Patches exist to protect those structures with a spinlock within the core kernel. The main sticking point appears to be the NFS lockd daemon, which uses `file_lock` structures and which, thus, requires the BKL; somebody is said to be working on fixing this code, but no patches have been posted yet. Until lockd has been converted, file locking as a whole requires the BKL. And, since it's a rare kernel that does not have file locking enabled, that will drag the BKL into almost all real-world kernel builds. 
+
+Even after that fix is in place, distributor kernels are likely to need the BKL for a bit longer. As long as there is even one module they ship which requires the BKL, the support for it needs to be there, even if most users will not have that module loaded. People who build their own kernels, though, should often be able to put together a configuration which does not need the BKL. If all goes well, 2.6.37 will have a configuration option which makes BKL-free builds possible. That's a huge step forward, even if the BKL still exists in most stock kernels.

@@ -1,0 +1,40 @@
+---
+title: Sidestepping kernel memory management with DMEMFS
+url: https://lwn.net/Articles/839216/
+date: "December 7, 2020"
+category: "Memory management-struct page"
+author: "By Jonathan Corbet December 7, 2020"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+By **Jonathan Corbet**  
+December 7, 2020
+
+One of the kernel's primary jobs is to manage the memory installed in the system. Over the years, though, there have been various reasons for removing a portion of the system's memory from the kernel's view. One of the latest can be seen in a mechanism called [DMEMFS](<https://lwn.net/ml/linux-kernel/cover.1607332046.git.yuleixzhang@tencent.com/>), which is being proposed as a way to get around some inefficiency in how the kernel keeps track of RAM. 
+
+In the early years, the motivation for hiding memory from the kernel was to avoid the problems caused by fragmentation. Allocating large contiguous areas tended to be nearly impossible after a system had been running for some time, creating problems for hardware that absolutely could not function without such areas. Once upon a time, an out-of-tree patch called "bigphysarea" was often used to reserve a range of memory for such allocations; since the kernel did not get its hands on this memory directly, it could not fragment it. LWN first [captured a bigphysarea announcement](</1999/1230/a/bigphysarea.html>) in 1999, but the patch had been around for some time by then. 
+
+In the relatively recent past (2010), the [contiguous memory allocator (CMA) patches](<https://lwn.net/Articles/396702/>) provided a similar functionality using the same technique. Since then, though, the problem of allocating large contiguous areas has gotten much smaller. The kernel's own defragmentation mechanisms have improved considerably, and simply having more memory around also helps. CMA [now relies on compaction](<https://lwn.net/Articles/486301/>) and no longer uses a carved-out memory region. 
+
+DMEMFS has a different motivation. The kernel tracks memory via a data structure called the "memory map", which is essentially an array of [`page` structures](<https://lwn.net/Articles/565097/>). A great deal of information is packed into this structure to tell the kernel how each page is used, track its position on various lists, connect it to its backing store, and more. Much effort has been expended over the years to keep `struct page` as small as possible, but it still occupies 64 bytes on 64-bit systems. 
+
+That may not seem like a lot of memory but, with the usual page size of 4KB, there are a lot of these structures in a contemporary system. A laptop with 16GB installed has 4,194,304 pages, meaning that 256MB of memory is used just to keep track of memory. Losing that much memory on a laptop is perhaps tolerable, but there are other settings where it hurts more. In the patch posting, author Yulei Zhang points out that a hosting provider running servers with 320GB of installed memory is losing 5GB of that memory to `page` structures. If that memory could be reclaimed, the provider could cram more guests into the machine, increasing the revenue that each server brings in — a metric that hosting providers pay a lot of attention to. 
+
+As described above, DMEMFS works by carving out a portion of system memory at boot time; the exact amount is controlled with the `dmem=` command-line parameter. The specified amount is reserved on _each_ NUMA node in the system; if that amount starts with "!", it tells DMEMFS how much memory to give the kernel while grabbing the rest. Once the system has booted, this carved-out memory can be allocated by mounting the `dmemfs` filesystem and creating one or more files of the desired size. A call to [`mmap()`](<https://man7.org/linux/man-pages/man2/mmap.2.html>) will map that memory into a process's address space. A DMEMFS file can also be handed to QEMU as the backing store for a guest machine. This memory supports NUMA policies and can provide huge pages, just like ordinary memory. 
+
+Perhaps DMEMFS is the best solution for use cases where making the most use of memory is paramount and there is no need for the kernel to actually manage that memory. But this is a 37-part patch set adding over 3,400 lines of code dedicated to cutting the kernel out of the management of an important system resource; whenever something like that comes along, it's worth looking at the source of the problem and whether other solutions might exist. 
+
+Back in 1991, when the first Linux kernel was posted, machines had less memory than they do now. [This archived PC ad](<https://books.google.com/books?id=WVAEAAAAMBAJ&lpg=PA1&dq=infoworld&pg=PT73&hl=en#v=onepage&q&f=false>) is instructive; a high-end system featured 4MB of RAM and cost a mere 3,700 1991 dollars. That system used 4KB pages, so there were a total of 1,024 pages for the kernel to manage. Most personal-computer systems at that time had less memory than that. 
+
+Contemporary computers are rather larger, but the page size remains 4KB, so the number of pages managed by the kernel has increased by three orders of magnitude or so. The number of `page` structures has increased accordingly. Those structures have also gotten larger; the transition to 64-bit processors, in particular, led to a significant increase in the size of `struct page`. The increased size hurts, obviously, but the sheer number of `page` structures also increases overhead in many places in the kernel. 
+
+One possible solution is to increase the size of the pages managed by the kernel, clustering multiple physical pages into larger groups if need be. Some architectures support use of larger page sizes now; the arm64 kernel can use a 64KB page size, for example. Over the years, numerous developers have attempted to implement some sort of generalized page clustering in the kernel, but none of those efforts have made it into the mainline. The complexity of the task has been one impediment to getting this work merged, but it's not the only one. 
+
+The other concern with using larger page sizes is internal fragmentation — wasting memory in situations where full pages must be allocated but only a small amount of memory is needed. A classic example is representing a small file in the page cache. A one-line shell script may fit into less than 100 bytes, but it still needs a full page in the page cache. Anything beyond those 100 bytes is wasted; larger pages will clearly waste more. Decades-old folk wisdom says that most files on Unix systems are small; that may be less true that it once was, though. 
+
+Your editor is unaware of any studies that have made a serious effort to measure the memory lost to internal fragmentation on real-world systems with a larger page size, but this concern has made it hard to get patches merged anyway. At the moment, the work that is closest is probably the [large pages in the page cache](<https://lwn.net/ml/linux-kernel/20200529025824.32296-1-willy@infradead.org/>) effort by Matthew Wilcox — which applies at a higher level and will not reduce the number of `page` structures in the system. 
+
+As a result, the DMEMFS patches may need to be merged for the simple reason that they exist now and work. But it may well be that the real solution to this problem lies elsewhere; rather than hide pages from the kernel, reduce the overhead within the kernel by dealing with memory in larger chunks. It seems inevitable that increasing memory sizes will eventually force that change; said change has, however, proved entirely evitable for many years of memory-size growth. Until the kernel can be changed to deal with memory more efficiently, there may be no choice other than merging workarounds that simply take the kernel out of the picture.

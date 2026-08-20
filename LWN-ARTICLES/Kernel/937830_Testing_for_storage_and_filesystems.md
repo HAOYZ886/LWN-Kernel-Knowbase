@@ -1,0 +1,98 @@
+---
+title: Testing for storage and filesystems
+url: https://lwn.net/Articles/937830/
+date: "July 12, 2023"
+category: "Development tools-Testing"
+author: "By Jake Edge July 12, 2023 LSFMM+BPF"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jake Edge**  
+July 12, 2023
+
+* * *
+
+[LSFMM+BPF](<https://lwn.net/Articles/lsfmmbpf2023>)
+
+The [kdevops](<https://github.com/linux-kdevops/kdevops>) kernel-testing framework has come up at several earlier summits, including in two [separate](<https://lwn.net/Articles/896670/>) [sessions](<https://lwn.net/Articles/897061/>) at last year's event. Testing kernel filesystems and the block layer, not to mention lots of other kernel subsystems, has become increasingly important over time. So it was no surprise that Luis Chamberlain led a combined storage and filesystem session at the [2023 Linux Storage, Filesystem, Memory-Management and BPF Summit](<https://lwn.net/Articles/lsfmmbpf2023>) to talk more about testing, the resources needed for it, and what can be done to improve it. It was the final session for this year's summit, so this article completes our coverage. 
+
+#### Update
+
+Chamberlain began by saying it was time "for the boring thing that no one likes to talk about, which is testing, but we all have to do somehow". He reviewed some of the plans that came out of last year's discussions, noting that the shared repository for testing results has been set up (in the kdevops repository linked above). It is a cooperative effort in the shared repository where, once a while, something gets broken and needs to be reverted, but overall it is working well. There is a [Discord server](<https://discord.com/invite/J3vkNRT7zZ>) ("I know some people hate that, but whatever") and there is an IRC channel on [OFTC](<https://www.oftc.net/>) as well. 
+
+[ ![\[Luis Chamberlain\]](https://static.lwn.net/images/2023/lsfmb-chamberlain3-sm.png) ](<https://lwn.net/Articles/938019/>)
+
+He recently found out that there is interest in storing extra information for successful runs along with the failures; there are tools that can scrape that information to do various kinds of analysis and display. Kdevops currently only creates a tarball of the failures, which can be committed to the repository; he is not sure if adding the successes to that will make the tarball too large to be stored in Git, but if so, perhaps it can go into some other kind of repository. 
+
+So far, it is only he and Chandan Babu who have been storing their results in the repository, but others can easily join in. The repository supports namespaces for testing efforts to use for their specific results. The compressed tarball contains logs and such of the failures, which can be decompressed and searched for things of interest, Chamberlain said. 
+
+There is support in kdevops for compiling kernels on fast systems using the 9p filesystem; those kernels can then be copied to guest systems where the tests are run. They encountered a few 9p bugs, but it seems to work fine with caching disabled at this point; if there are advantages to doing so, switching to NFS is possible. He said that Darrick Wong had thought that modules were not supported for kdevops kernels, but that is not the case; in addition, module signing can be used to ensure the proper modules are loaded. 
+
+The framework is being used as part of the XFS stable testing that was the subject of a [session](<https://lwn.net/Articles/934941/>) earlier that day, Chamberlain said. Both Babu and Amir Goldstein are using it for their testing as part of that effort and it is an example of kdevops being used in two different ways: on local virtual machines (VMs) and in the cloud. In fact, Babu added support for the Oracle cloud (OCI) to kdevops so that he could run his tests on that platform. The kdevops cloud support uses [Terraform](<https://www.terraform.io/>) so other cloud providers with support for that can be added easily, Chamberlain said. 
+
+He would not be giving a kdevops demo, he said, because he wanted to discuss other things. There are demos available on YouTube already and he is happy to add others for specific workflows or other pieces as needed. He uses kdevops for day-to-day development work and not just for testing, so it can be used in multiple ways. 
+
+Kdevops is using [virtio](<https://wiki.libvirt.org/Virtio.html>) because it ran into problems with QEMU instantiating NVMe drives. It uses the [IOThread feature](<https://github.com/qemu/qemu/blob/master/docs/devel/multiple-iothreads.txt>) of QEMU to avoid the global lock by allowing each drive to run independently. Without IOThread, there were lots of problems with timeouts when he and Goldstein were testing XFS. Support for IOThread on NVMe is coming, which should allow switching away from virtio, Chamberlain said. 
+
+There is initial support for testing on arm64 systems in the cloud; he needed that for testing his work on supporting [large block sizes](<https://lwn.net/Articles/933437/>). Some systems are reporting larger block sizes; but they are generally doing so by emulating them using [atomic writes](<https://lwn.net/Articles/933015/>). There are no local virtualization images for arm64 available, other than for openSUSE Tumbleweed, that he knows of at this time; he is not sure whether there are plans for other distributions to add them. 
+
+#### Resources
+
+The main thing he wanted to discuss was the resources needed for testing and limiting the scope of the testing in order to use those resources most effectively. The non-controversial suggestion that he had was to use the `MAINTAINERS` file to track which test runner and which tests to use for individual filesystems and block-layer pieces; the idea is to allow the community to help with testing in ways that will be useful to the maintainers of those parts of the kernel. 
+
+But there is also a need for systems to use for automation and, of course, for people to do the work on running the tests and maintaining the test systems. His employer, Samsung, has allowed him to share the system that he uses for development with others; community developers who want to test can simply log in and do what they need to do. That has reached a point where there are times that he cannot get his work done on that system so he has to ask the other developers if he can shut some of their VMs down. 
+
+That led him to ask Samsung for an additional system, but the company asked him to see what other vendors might be willing to provide. He started that process and one vendor has provided cloud credits for use by the community. Wong came in remotely to encourage people to use the OCI free tier for their kdevops testing needs; "we provide the hardware and Luis provides the software". Jeff Layton asked if anyone could volunteer to write some documentation on using kdevops on OCI; Chamberlain said that he could do so if no one else got around to it. 
+
+He also talked to Microsoft about Azure and to Alibaba about its cloud offering, but they are still in the evaluation stage. Wong said that he had resisted using OCI because he was so accustomed to using the pet machines in his lab; once he started, it worked well. "I can spin up like 170 VMs to go run testing on several different profiles and I can run this thing every night." That all went really well until he "managed to consume all of the department's resources and now they are telling me that I need to back off a little bit". Chamberlain agreed that kdevops testing may encounter those kinds of resource limits. 
+
+He encouraged attendees to see what they could do to help procure more resources for the effort. Hannes Reinecke said that it may be difficult for companies to provide login access to their systems to anyone who is not an employee. Internally, SUSE has systems that test particular Git trees or branches automatically, then provide the results of that testing, so even kernel-developer employees do not log into those systems. 
+
+Chamberlain said that it is important that this effort be vendor-neutral; people switch jobs but still need to be able to test their work. The more resources there are available from multiple companies, the better the whole testing environment will work over the long term. If there are ways that companies can run tests for the community on specific Git trees and branches, that would definitely be useful as well. 
+
+Ted Ts'o said that an arrangement where a certain Git tree or branch was watched and tested after changes might be more palatable to companies; that way, random non-employees would not be logging in and the company could throttle the amount of testing per day that it does. Chamberlain agreed, but said that it is important for the maintainers of the components to specify the tests that they want to have run for their subsystems; they can provide a configuration for kdevops or some other tool that can be used by automated systems. 
+
+Ts'o said that he would really like it if developers could run a simple smoke test on their own systems before submitting a patch to him; he has a test appliance that can easily run in a VM on a developer's regular system to find many of the simple problems with a given patch. It takes only about 15 minutes to run that and no cloud resources are needed at all. Damien Le Moal pointed out that people do not know how to go about doing that, so adding a pointer to the information in the `MAINTAINERS` file would be helpful. Ts'o agreed, noting that there is a difference between the big, expensive, long-running tests that he or Wong might run and the simple smoke tests that individual developers can run on their own patches; that model scales well since there are way more developers than maintainers. 
+
+Amir Goldstein said that since the smoke tests are so simple, it would be easy for Google or someone to run them automatically for developers when they push a commit to a specific branch. He asked Layton about a recent ctime bug that was found recently; didn't Layton get an email from a testing bot about that problem? Layton said that he did, but that the coverage of the testing bots is lacking; they test the major filesystems, but not NFS or CIFS, for example. 
+
+Chamberlain said that he is available to help developers get set up with kdevops and to automate their workflows with it. He has recently added some demo workflows, including one with basic support for [Compute Express Link](<https://lwn.net/Articles/931282/>) (CXL); it used to be difficult to set up testing for CXL but it should be much easier now. Josef Bacik added PCI-passthrough support, so there is now a kdevops configuration for that. 
+
+#### People
+
+Something else that is needed for these efforts is volunteers to run tests, Chamberlain said. As came up in the XFS-stable-testing session, there are maintainers who want help testing their subsystems for stable kernels and other reasons. It is a good opportunity to learn about the subsystem and the community, in general; it will also provide insights about new features and technology. All of the filesystem maintainers need help with testing, he said, "so if you have any interest, poke at them". 
+
+An alternative would be to pool money to hire people for this work. At earlier LSFMM gatherings, it was said that "money is not the problem", but that there needed to be a framework for the testing effort. Some of that work has been done at this point, so does it make sense to try to gather up financial resources to attack the problem? The current financial climate in the industry ("layoffs happened") may preclude that, so until that changes, finding volunteers to do this work is needed. 
+
+Layton wondered if it made sense to "hire people to just push buttons"; it would be better to "automate as much of this as we can" to have computers do the work rather than people. Ts'o said that if money were available, he thinks it might be best spent on enhancing [KernelCI](<https://kernelci.org/>) so that there could be a common dashboard reporting on all of the various testing efforts. The results of fstests could be sent to a central location, along with the test artifacts that would help someone track down the causes of any failures, and the dashboard would allow people to view all of that information. 
+
+The ability for others to see the failures along with enough information to look into them is valuable. The dashboard for the syzbot fuzzer has allowed community members to track down various bugs, fix them, and send him patches, so that model can work well, Ts'o said. The idea is to allow others beyond just the person running the tests to fix the problems that are found. 
+
+Chamberlain said that he had looked at integrating with KernelCI, but bounced off of the [LAVA](<https://www.lavasoftware.org/>) continuous-integration (CI) system that is used for most of its test labs. Having a public dashboard is the right model, Ts'o said, but that all of the money that went into KernelCI targeted testing Arm boot and devicetree. "Someone needs to throw more money at KernelCI for other subsystems other than devicetree", he said. If someone wanted to look into the LAVA stuff for use in kdevops, it would be helpful, Chamberlain said. 
+
+#### Test changes
+
+Steve French asked about a problem he has encountered: the fstests change over time, so tests that once failed suddenly will start passing (or vice versa). Chamberlain said that kdevops users have encountered that problem as well. There is a need to stabilize the tests, but choosing a particular fstests tag to stick with for a while is the best that can be done right now. He would like to see tags get added for [blktests](<https://github.com/osandov/blktests>) as well. 
+
+Ts'o said that a maintainer who wants to be running fstests regularly needs to follow and actively participate in the [fstests mailing list](<https://www.spinics.net/lists/fstests/>) in order to keep up with changes and fixes in the tests. For example, a test might be added to ensure that a specific security problem has been fixed; a filesystem maintainer will want that test, so they will not be able to stabilize on a six-month old fstests release. Sometimes tests fail due to, say, an upgrade of Bash or coreutils; the fixes for those kinds of problems will be needed as well. 
+
+But Goldstein said that he thinks one of the goals of kdevops is simplicity. It has "expunge" files (lists of tests that are expected to fail) that are extremely specific with regard to which kernel they apply to; if you want to test a different kernel, a new expunge list (or symbolic link to an existing one) is needed. It is not perfect, he said, but it does meet the simplicity goal. Ts'o, who has his own [xfstests-bld testing framework](<https://github.com/tytso/xfstests-bld>), said that he has been running the exclude files (similar to the expunge files for kdevops) through the C preprocessor with `#ifdef` sections for different kernel versions. He suggested that kdevops might want to do something similar; Goldstein noted that the `Fixes:` tags could be used by a preprocessor to automatically reflect changes into the expunge/exclude file. 
+
+An attendee shifted gears a bit by describing what the BPF community has been doing with its testing. He said that it uses [Patchwork](<https://github.com/getpatchwork/patchwork>) as an [integral part of the workflow](<https://patchwork.kernel.org/project/netdevbpf/>); Patchwork picks up patches from the mailing list and runs tests on the GitHub CI system so that developers can see if their code is causing failures. That system has worked well for the BPF project, he said. 
+
+Christian Brauner said that, perhaps surprisingly, Patchwork is set up for the kernel, "it is just unused". He has a to-do item to look into using it because he thinks the patch-series tracking would be useful, separate from any CI integration as was suggested. Ts'o noted that there are other Patchwork instances that are maintained for some subsystems; it would be good to list those instances somewhere in the kernel documentation, perhaps the `MAINTAINERS` file or the subsystem-description documentation that is being worked on. 
+
+French thinks that fstests does not have enough tests; there are around 800 currently, but he thinks it should be more like 2000\. He wondered if there was a way to make the test framework so compelling that it would cause bug reporters to also send a test case that could be incorporated into fstests. Can it raise the visibility of the importance of tests in a way that would attract more test development? 
+
+Chamberlain said that he thinks the answer is "yes", but that kdevops itself is not the right component for adding tests; it exists to automate running the testing tools that already exist in the community: fstests, blktests, the kernel selftests, and others. Ts'o said that it is difficult to write test cases for fstests, in general, because they need to be "small, self-contained, and easy to reproduce". The bug reports he gets tend to be long-running without failing reliably; once the bug is found, he tries to come up with something on the order of a ten-line shell script to reproduce it. In the rare cases where the bug reporter has a small test to reproduce the problem, it is possible to encourage them to turn that into a test case for fstests. Better documentation on how to write those test cases would help as well. 
+
+French asked about testing stable kernels, which is not something he does often; Chamberlain said that it is easy to add a new kernel to kdevops, but the time-consuming part is to get a baseline of the expected test failures in order to create the expunge list for it. Fstests has tons of tests that fail for one reason or another, which is expected; determining why and documenting which should fail takes time. Ts'o said there are ways to use fstests without creating the baseline; when evaluating patches for the stable kernels, he looks for failing tests and then tries them on the earlier kernel. If the test fails at more or less the same rate on the earlier kernel, it gets treated as an expected failure, otherwise the patch itself is the likely culprit. 
+
+He noted that if this testing is going to use cloud resources, it is important that it use them efficiently. For example, he looked at the OCI free tier and noted that idle VMs get shut down quickly, which makes sense; VMs should be created just as they are needed and automatically shut down after the test run has completed. He has done some work to ensure that a kernel that hangs because it is spinning in a deadlock gets automatically killed rather than run for hours or days uselessly. 
+
+Shin'ichiro Kawasaki, who works on blktests, said that while most of the discussion focused on fstests, it is largely applicable to blktests as well. Unlike fstests, though, blktests are rather small, so he is not sure that a tag for them is all that useful; he suggested using Git commit IDs instead. Chamberlain agreed that could work, but was hoping that the tag could effectively indicate a release that had been tested and "blessed" by the blktests developers. Kawasaki agreed that tagging would help with that, so tags will be applied in the future. 
+
+With that, time ran out on the session and, for the most part, on LSFMM+BPF as a whole.

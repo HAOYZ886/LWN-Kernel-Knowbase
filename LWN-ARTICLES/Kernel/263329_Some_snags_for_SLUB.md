@@ -1,0 +1,36 @@
+---
+title: Some snags for SLUB
+url: https://lwn.net/Articles/263329/
+date: "December 28, 2007"
+category: "Memory management-Slab allocators; Slab allocator"
+author: "By Jonathan Corbet December 28, 2007"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+December 28, 2007
+
+The [SLUB allocator](<http://lwn.net/Articles/229984/>) is a new implementation of the kernel's low-level page allocator; it is a replacement for the long-lived slab allocator. SLUB was merged for 2.6.22 and made the default allocator for 2.6.23. The long-term plan has always been for SLUB to eventually displace the older slab allocator entirely. That may yet happen, but SLUB has run into a couple of difficulties on its way toward being the one true kernel memory allocator. 
+
+The first problem had to do with performance regressions in a few specific situations. It turns out that the [hackbench](<http://devresources.linux-foundation.org/craiger/hackbench/>) benchmark, which measures scheduler performance, runs slower when the SLUB allocator is being used. In fact, SLUB can cut performance for that benchmark in half, which is enough to raise plenty of eyebrows. This result was widely reproduced; there were also reports of regressions with the proprietary [TPC-C](<http://www.tpc.org/tpcc/>) benchmark which were not easily reproduced. In both cases, SLUB developer Christoph Lameter was seen as being overly slow in getting a fix out; after all, it is normal to get immediate turnaround on benchmark regressions over the end-of-year holiday period. 
+
+When Christoph got back to this problem, he posted [a lengthy analysis](<https://lwn.net/Articles/263332/>) which asserted that the real scope of the problem was quite small. He concluded: ""given all the boundaries for the contention I would think that it is not worth addressing."" This was [not the answer Linus was looking for](<https://lwn.net/Articles/263333/>): 
+
+It really is that simple. Either you say "Hell yes, I'll fix it", or SLUB goes away. There simply is no other choice. When you say "not worth addressing", that to me is a clear an unambiguous "let's remove SLUB". 
+
+About this time, the solution to this problem came along in response to [a note from Pekka Enberg](<https://lwn.net/Articles/263334/>) pointing out that, according to the profiles, an internal SLUB function called `add_partial()` was accounting for much of the time used. The SLUB allocator works by dividing pages into objects of the same size, with no metadata of its own within those pages. When all objects from a page have been allocated, SLUB forgets about the page altogether. But when one of those objects is freed, SLUB must note the page as a "partial" page and add it to its queue of available memory. This addition of partial pages, it seems, was happening far more often than it should. 
+
+The hackbench tool works by passing data quickly between CPUs and measuring how the scheduler responds. In the process, it forces a lot of quick allocation and free operations and that, in turn, was causing the creation of a lot of partial pages. The specific problem was that, when a partial page was created, it was added to the head of the list, meaning that the next allocation operation would allocate the single object available on that page and cause the partial page to become full again. So SLUB would forget about it. When the next free happened, the cycle would happen all over again. 
+
+[PULL QUOTE:  Once Christoph figured this out, the fix was a simple one-liner: partial pages should be added to the tail of the list instead of the head.  END QUOTE] Once Christoph figured this out, [the fix](<https://lwn.net/Articles/263335/>) was a simple one-liner: partial pages should be added to the tail of the list instead of the head. That would give the page time to accumulate more free objects before it was once again the source for allocations and minimize the number of additions and removals of partial pages. The [results](<https://lwn.net/Articles/263336/>) came back quickly: the hackbench regression was fixed. There have been no TPC-C results posted (the license for this benchmark suite is not friendly toward the posting of results), but it is expected that the TPC-C regression should be fixed as well. 
+
+Meanwhile, another, somewhat belated complaint about SLUB made the rounds: there is no equivalent to `/proc/slabinfo` for the SLUB allocator. The `slabinfo` file can be a highly effective tool for figuring out where kernel-allocated memory is going; it is a quick and effective view of current allocation patterns. The associated `slabtop` tool makes the information even more accessible. The failure of `slabtop` to work when SLUB is used has been an irritant for some developers for a while; it seems likely that more people will complain when SLUB finds its way into the stock distributor kernels. Linux users are generally asking for more information about how the kernel is working; removing a useful source of that information is unlikely to make them happy. 
+
+Some developers went as far as to say that the `slabinfo` file is part of the user-space ABI and, thus, must be preserved indefinitely. It is hard to say how such an interface could truly be cast in stone, though; it is a fairly direct view into kernel internals which will change quickly over time. So the ABI argument probably will not get too far, but the need for the ability to query kernel memory allocation patterns remains. 
+
+There are two solutions to this problem in the works. The first is Pekka Enberg's [slabinfo replacement patch](<https://lwn.net/Articles/263337/>) for SLUB, which provides enough information to make `slabtop` work. But the real source for this information in the future will be the rather impressive set of files found in `/sys/slab`. Digging through that directory by hand is not really recommended, especially given that there's a better way: the `slabinfo.c` file found in the kernel source (under `Documentation/vm`) can be compiled into a tool which provides concise and useful information about current slab usage. Eventually distributors will start shipping this tool (it should probably find a home in the util-linux collection); for now, building it from the kernel source is the way to go. 
+
+The final remaining problem here has taken a familiar form: the dreaded [message from Al Viro](<https://lwn.net/Articles/263338/>) on how the lifecycle rules for the files in `/sys/slab` are all wrong. It turns out that even a developer like Christoph, who can hack core memory management code and make 4096-processor systems hum, [has a hard time with sysfs](<https://lwn.net/Articles/263339/>). As does just about everybody else who works with that code. There are patches around to rationalize sysfs; maybe they will help to avoid problems in the future. SLUB will need a quicker fix, but, if that's the final remaining problem for this code, it would seem that One True Allocator status is almost within reach.

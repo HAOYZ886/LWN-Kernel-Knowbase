@@ -1,0 +1,56 @@
+---
+title: "Reservations for must-succeed memory allocations"
+url: https://lwn.net/Articles/636797/
+date: "March 17, 2015"
+category: "Memory management-Page allocator"
+author: "By Jonathan Corbet March 17, 2015 LSFMM 2015"
+---
+
+By **Jonathan Corbet**  
+March 17, 2015
+
+* * *
+
+[LSFMM 2015](<https://lwn.net/Articles/lsfmm2015/>)
+
+When the [schedule](<http://events.linuxfoundation.org/events/linux-storage-filesystem-and-mm-summit/program/schedule>) for the 2015 Linux Storage, Filesystem, and Memory Management Summit was laid out, its authors optimistically set aside 30 minutes on the first day for the thorny issue of memory-allocation problems in low-memory situations. That session ([covered here](<https://lwn.net/Articles/636017/>)) didn't get past the issue of whether small allocations should be allowed to fail, so the remainder of the discussion, focused on finding better solutions for the problem of allocations that simply cannot fail, was pushed into a plenary session on the second day. 
+
+Michal Hocko started off by saying that the memory-management developers would like to deprecate the `__GFP_NOFAIL` flag, which is used to mark allocation requests that must succeed at any cost. But doing so, it turns out, just drives developers to put infinite retry loops into their own code rather than using the allocator's version. That, he noted dryly, is not a step forward. Retry loops spread throughout the kernel are harder to find and harder to fix, and they hide the "must succeed" nature of the request from the memory-management code. 
+
+Getting rid of those loops is thus, from the point of view of the memory-management developers, a desirable thing to do. So Michal asked the gathered developers to work toward their elimination. Whenever such a loop is encountered, he said, it should just be replaced by a `__GFP_NOFAIL` allocation. Once that's done, the next step is to figure out how to get rid of the must-succeed allocation altogether. Michal has been trying to find ways of locating these retry loops automatically, but attempts to use Coccinelle to that end have shown that the problem is surprisingly hard. 
+
+Johannes Weiner mentioned that he has been working recently to improve the out-of-memory (OOM) killer, but that goal proved hard to reach as well. No matter how good the OOM killer is, it is still based on heuristics and will often get things wrong. The fact that almost everything involved with the OOM killer runs in various error paths does not help; it makes OOM-killer changes hard to verify. 
+
+> **`$ sudo subscribe today`**
+> 
+> Subscribe today and elevate your LWN privileges. You’ll have access to all of LWN’s high-quality articles as soon as they’re published, and help support LWN in the process. [Act now](<https://lwn.net/Promo/nst-sudo/claim>) and you can start with a free trial subscription. 
+
+The OOM killer is also subject to deadlocks. Whenever code requests a memory allocation while holding a lock, it is relying on there being a potential OOM-killer victim task out there that does not need that particular lock. There are some workloads, often involving a small number of processes running in a memory control group, where every task depends on the same lock. On such systems, a low-memory situation that brings the OOM killer into play may well lead to a full system lockup. 
+
+Rather than depend on the OOM killer, he said, it is far better for kernel code to ensure that the resources it needs are available before starting a transaction or getting into some other situation where things cannot be backed out. To that end, there has been talk recently of creating some sort of reservation system for memory. Reservations have downsides too, though; they can be more wasteful of memory overall. Some of that waste can be reduced by placing reclaimable pages in the reserve; that memory is in use, but it can be reclaimed and reallocated quickly should the need arise. 
+
+James Bottomley suggested that reserves need only be a page or so of memory, but XFS maintainer Dave Chinner was quick to state that this is not the case. Imagine, he said, a transaction to create a file in an XFS [![\[Dave Chinner\]](https://static.lwn.net/images/conf/2015/lsfmm/DaveChinner-sm.jpg)](<https://lwn.net/Articles/636798/>) filesystem. It starts with allocations to create an inode and update the directory; that may involve allocating memory to hold and manipulate free-space bitmaps. Some blocks may need to be allocated to hold the directory itself; it may be necessary to work through 1MB of stuff to find the directory block that can hold the new entry. Once that happens, the target block can be pinned. 
+
+This work cannot be backed out once it has begun. Actually, it might be possible to implement a robust back-out mechanism for XFS transactions, but it would take years and double the memory requirements, making the actual problem worse. All of this is complicated by the fact that the virtual filesystem (VFS) layer will have already taken locks before calling into the filesystem code. It is not worth the trouble to implement a rollback mechanism, he said, just to be able to handle a rare corner case. 
+
+Since the amount of work required to execute the transaction is not known ahead of time, it is not possible to preallocate all of the needed memory before crossing the point of no return. It should be possible, though, to produce a worst-case estimate of memory requirements and set aside a reserve in the memory-management layer. The size of that reserve, for an XFS transaction, would be on the order of 200-300KB, but the filesystem would almost never use it all. That memory could be used for other purposes while the transaction is running as long as it can be grabbed if need be. 
+
+XFS has a reservation system built into it now, but it manages space in the transaction log rather than memory. The amount of concurrency in the filesystem is limited by the available log space; on a busy system with a large log he has seen 7-8000 transactions active at once. The reservation system works well and is already generating estimates of the amount of space required; all that is needed is to extend it to memory. 
+
+A couple of developers raised concerns about the rest of the I/O stack; even if the filesystem knows what it needs, it has little visibility into what the lower I/O layers will require. But Dave replied that these layers were all converted to use [mempools](<https://lwn.net/Articles/22909/#mempool>) years ago; they are guaranteed to be able to make forward progress, even if it's slow. Filesystems layered on top of other filesystems could add some complication; it may be necessary to add a mechanism where the lower-level filesystem can report its worst-case requirement to the upper-level filesystem. 
+
+The reserve would be maintained by the memory-management subsystem. Prior to entering a transaction, a filesystem (or other module with similar memory needs) would request a reservation for its worst-case memory use. If that memory is not available, the request will stall at this point, throttling the users of reservations. Thereafter, a special GFP flag would indicate that an allocation should dip into the reserve if memory is tight. There is a slight complication around demand paging, though: as XFS is reading in all of those directory blocks to find a place to put a new file, it will have to allocate memory to hold them in the page cache. Most of the time, though, the blocks are not needed for any period of time and can be reclaimed almost immediately; these blocks, Dave said, should not be counted against the reserve. Actual accounting of reserved memory should, instead, be done when a page is pinned. 
+
+Johannes pointed out that all reservations would be managed in a single, large pool. If one user underestimates their needs and allocates beyond their reservation, it could ruin the guarantees for all users. Dave answered that this eventuality is what the reservation accounting is for. The accounting code can tell when a transaction overruns its reservation and put out a big log message showing where things went wrong. On systems configured for debugging it could even panic the system, though one would not do that on a production system, of course. 
+
+The handling of slab allocations brings some challenges of its own. The way forward there seems to be to assume that every object allocated from a slab requires a full page allocation to support it. That adds a fair amount to the memory requirements — an XFS transaction can require as many as fifty slab allocations. 
+
+Many (or most) transactions will not need to use their full reservation to complete. Given that there may be a large number of transactions running at any given time, it was suggested, perhaps the kernel could get away with a reservation pool that is smaller than the total number of pages requested in all of the active reservations. But Dave was unenthusiastic, describing this as another way of overcommitting memory that would lead to problems eventually. 
+
+Johannes worried that a reservation system would add a bunch of complexity to the system. And, perhaps, nobody will want to use it; instead, they will all want to enable overcommitting of the reserve to get their memory and (maybe) performance back. Ted Ts'o also thought that there might not be much demand for this capability; in the real world, deadlocks related to low-memory conditions are exceedingly rare. But Dave said that the extra complexity should be minimal; XFS, in particular, already has almost everything that it needs. 
+
+Ted insisted, though, that this work is addressing a corner case; things work properly, he said, 99.9999% of the time. Do we really want to add the extra complexity just to make things work better on under-resourced systems? Ric Wheeler responded that we really shouldn't have a system where unprivileged users can fire off too much work and crash the box. Dave agreed that such problems can, and should, be fixed. 
+
+Even if there is a reserve, Ted said, administrators will often turn it off in order to eliminate the performance hit from the reservation system (which he estimated at 5%); they'll do so with local kernel patches if need be. Dave agreed that it should be possible to turn the reservation system off, but doubted that there would be any significant runtime impact. Chris Mason agreed, saying that there is no code yet, so we should not assume that it will cause a performance hit. Dave said that the real effect of a reservation would be to move throttling from the middle of a transaction to the beginning; the throttling happens in either case. James was not entirely ready to accept that, though; in current systems, he said, we usually muddle through a low-memory situation, while with a reservation we will be actively throttling requests. Throughput could well suffer in that situation. 
+
+The only reliable way to judge the performance impact of a reservation system, though, will be to observe it in operation; that will be hard to do until this system is implemented. Johannes closed out the session by stating the apparent consensus: the reservation system should be implemented, but it should be configurable for administrators who want to turn it off. So the next step is to wait for the patches to show up.

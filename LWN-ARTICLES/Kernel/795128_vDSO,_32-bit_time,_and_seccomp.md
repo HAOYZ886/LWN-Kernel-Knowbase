@@ -1,0 +1,46 @@
+---
+title: "vDSO, 32-bit time, and seccomp"
+url: https://lwn.net/Articles/795128/
+date: "August 2, 2019"
+category: "Security-seccomp; vDSO"
+author: "By Jonathan Corbet August 2, 2019"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+August 2, 2019
+
+The [`seccomp()`](<http://man7.org/linux/man-pages/man2/seccomp.2.html>) mechanism is notoriously difficult to use. It also turns out to be easy to break unintentionally, as the development community discovered when a timekeeping change meant to address the [year-2038 problem](<https://lwn.net/Articles/776435/>) created a regression for `seccomp()` users in the 5.3 kernel. Work is underway to mitigate the problem for now, but `seccomp()` users on 32-bit systems are likely to have to change their configurations at some point. 
+
+The [virtual dynamic shared object](<https://lwn.net/Articles/615809/>) (vDSO) mechanism is an optimization provided by the kernel to reduce the cost of certain frequently used system calls. The vDSO is a small region of kernel-provided memory that is normally mapped into the address space of every user-space process; it contains implementations of system calls that can, in some circumstances at least, do their work in a user-space context. That allows the caller to avoid making a real system call and, thus, to avoid the cost of a context switch into kernel mode. System calls related to timekeeping, such as [`gettimeofday()`](<http://man7.org/linux/man-pages/man2/gettimeofday.2.html>) are implemented in the vDSO, since they can often run quickly in user space and they tend to be called frequently. 
+
+The vDSO has generally been implemented in an architecture-specific way, even though the functions it performs are mostly the same across architectures. In the 5.2 development cycle, Vincenzo Frascino [added a generic vDSO implementation](<https://git.kernel.org/linus/00b26474c2f1>) that factored out much of the architecture-specific code into a single implementation that could be used on all architectures. During the 5.3 merge window, the x86 architecture [switched over](<https://git.kernel.org/linus/7ac870747988>) to the generic version, and all was well — or so it seemed. 
+
+#### `seccomp()` sadness
+
+In mid-July, Sean Christopherson (among others) [reported](<https://lwn.net/ml/linux-kernel/20190719170343.GA13680@linux.intel.com/>) that the generic vDSO change broke some `seccomp()` users on 32-bit x86 systems. `seccomp()`, remember, allows user space to provide a BPF program (still "classic BPF", not eBPF as is used almost everywhere else in a contemporary Linux system) to control which system calls may be made. It is used to reduce the attack surface of code that might be exposed to attackers in one way or another; using it correctly is hard, but the number of users has been on the rise. 
+
+While the vDSO can usually implement timekeeping system calls in user space, that is not always possible. If the calling program wants an esoteric clock that has not been implemented, or if the timekeeping hardware available on the system is not amenable to vDSO access, then the vDSO must fall back to calling into the kernel. Prior to 5.3, the architecture-specific vDSO used the native [`clock_gettime()`](<http://man7.org/linux/man-pages/man3/clock_gettime.3.html>) call on the system it was running on; that meant calling the 32-bit `clock_gettime()` on 32-bit kernels. 
+
+The 32-bit time format is, of course, going to run out of range in January 2038\. Quite a bit of work has gone into preparing systems for this particular apocalypse, though much work still remains. Given this problem, adding new users of 32-bit time interfaces is a way to become rather unpopular in kernel-development circles, so the generic vDSO implementation naturally used `clock_gettime64()` as the fallback timekeeping system call on all architectures. That is not the sort of thing that one would ordinarily even have to think about much; nobody wants to create a generic vDSO implementation that contains yet another year-2038 problem in need of fixing. 
+
+But there is a problem here. A surprising number of programs want to know what time it is at some point or another. Anybody putting together a `seccomp()` policy for a given program will almost certainly allow system calls like `gettimeofday()`; otherwise the target program will probably break. A program that fails to run is generally secure, but users, being generally unreasonable, tend to get disgruntled anyway. 
+
+Any rational `seccomp()` policy will, thus, allow for the fallback system call when the vDSO is unable to provide the time directly. But it turns out that, while these policies allowed `clock_gettime()` on 32-bit systems, they lacked the foresight to let `clock_gettime64()` through as well. The end result is that, when a program protected by one of these `seccomp()` policies runs on a 5.3 kernel, it is quickly and rudely killed when it tries to make a disallowed system call. 
+
+Kernel developers might protest that this change is required to avoid year-2038 problems. They might also be naturally inclined to disregard lame excuses about how `clock_gettime64()` was never needed before, or about how that system call didn't even exist until the 5.1 release. But, in the end, this is a regression, and the kernel community's policy on such things is fairly unambiguous. Somehow, programs running under existing `seccomp()` policies will need to continue to work when the final 5.3 kernel comes out. 
+
+#### Fixing the problem
+
+Various ideas were raised for how that could be done, starting with a not-entirely-serious suggestion that the generic vDSO change could simply be reverted. Perhaps `seccomp()` rules could be bypassed for system calls that originate in the vDSO; this idea didn't get far given that, among other things, faking a vDSO return address is not a difficult thing to do. Bypassing `seccomp()` for `clock_gettime64()` specifically is an option, but that would defeat administrators who want to block all access to timekeeping information. The concept of "system-call aliases" was circulated, [initially](<https://lwn.net/ml/linux-kernel/19EF7AC8-609A-4E86-B45E-98DFE965DAAB@amacapital.net/>) by Andy Lutomirski; it would create a short list of "equivalent" system calls that take the same arguments and do the same thing. If one call in the list was rejected by a `seccomp()` filter, the kernel would retry the policy with any aliases that might exist. 
+
+The alias idea got further than many, but it has problems of its own. For example, authors of `seccomp()` policies might genuinely want to discriminate between "equivalent" system calls. It seems like the sort of mechanism that could generate surprising results in general. Aliases might still be the long-term solution for this problem but, as Lutomirski [pointed out](<https://lwn.net/ml/linux-kernel/CALCETrUe50sbMx+Pg+fQdVFVeZ_zTffNWGJUmYy53fcHNrOhrQ@mail.gmail.com/>), ""it's getting quite late to start inventing new seccomp features to fix this"". Something simpler is needed, at least for the 5.3 release. 
+
+That something is likely to be based on [this patch series](<https://lwn.net/ml/linux-kernel/20190728131251.622415456@linutronix.de/>) from Thomas Gleixner, which simply causes the vDSO to fall back to the 32-bit `clock_gettime()` system call on 32-bit systems. It is a solution that is pleasing to nobody, but it solves the regression issue for now. 
+
+Some other solution will be required eventually; it is not possible to support 32-bit time indefinitely. One possibility is that the authors of `seccomp()` policies change their code to allow `clock_gettime64()` as well. But, even if that could be done and widely deployed, there is no strong incentive for developers to do this work, since their existing policies will continue to function as intended. Some sort of multi-year deprecation process could be considered as a way to force policies to be fixed. But the eventual solution may just have to live in `seccomp()` instead, perhaps in the form of an alias list or other special exception. A long-term solution that is pleasing to everybody is difficult to envision. 
+
+This situation highlights a problem with `seccomp()` in general: it is difficult to write robust policies at that level of detail, and the resulting policies tend to be brittle in the best of times. Even if the kernel community avoids incompatible changes, a change in a library somewhere can invoke a new system call that a given `seccomp()` policy may frown upon. While the [OpenBSD `pledge()`](<https://man.openbsd.org/pledge>) mechanism may not offer the degree of control provided by `seccomp()`, its use of relatively broad categories of functionality makes it easier to avoid problems like this. But Linux has `seccomp()`, with all its power and complexity. It seems highly likely that developers will unwittingly run into this sort of regression again in the future.

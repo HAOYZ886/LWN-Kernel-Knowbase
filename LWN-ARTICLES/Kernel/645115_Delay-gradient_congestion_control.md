@@ -1,0 +1,42 @@
+---
+title: "Delay-gradient congestion control"
+url: https://lwn.net/Articles/645115/
+date: "May 20, 2015"
+category: "Networking-Congestion control"
+author: "By Jonathan Corbet May 20, 2015"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+May 20, 2015
+
+Network congestion-control algorithms have a difficult task to perform. They must moderate each endpoint's outgoing traffic to keep the Internet from being overwhelmed by packet congestion (as happened in 1986 before these algorithms were introduced). But, at the same time, the algorithm is expected to allow a machine to make full use of the bandwidth available to it, sharing that bandwidth with other systems without any sort of central control mechanism. Err on one side, and the network as a whole suffers; err on the other, and performance will suffer. So it is not surprising that, long after workable solutions to the congestion-control problem exist, research continues in this area. One relatively new algorithm is called "CAIA delay gradient" (or CDG); it is named after the [Centre for Advanced Internet Architectures](<http://caia.swin.edu.au/>) where it was first developed for FreeBSD. A [patch adding CDG to the kernel](<https://lwn.net/Articles/645015/>) was recently posted for review. 
+
+Most congestion-control algorithms are based on the use of packet loss as a signal that indicates congestion somewhere along the path used by the connection. When all goes well, a connection should not experience packet loss. If a router's buffers fill, though, that router will start to drop packets; a congestion-control algorithm will respond to that packet loss by reducing the number of packets that can be outstanding (the "congestion window") at any given time. Typically, the congestion window will then be allowed to creep back up until the next packet loss occurs, indicating that the limit has once again been reached. 
+
+Loss-based congestion control has served the net well for the better part of thirty years, but it is not without its drawbacks. By its nature, it will cause packets to be dropped occasionally; that will necessarily introduce latency into the connection which, perhaps, can ill afford it. Loss-based algorithms can only find the limit for a given connection by pushing the slowest link to its limit, meaning that it forces a router buffer somewhere to overflow; this behavior can also worsen bufferbloat-related problems. There are also problems when packets are lost for reasons other than congestion, as can happen with wireless links, for example. The congestion-control code will interpret that loss as a congestion signal, slowing transmission unnecessarily. 
+
+The alternative, as implemented by CDG, is to try to infer the state of a connection by looking at the variation in the round-trip time (RTT) — the time it takes for a packet to transit the connection in both directions. Using RTT to estimate congestion is easy if one knows the actual characteristics of the connection in use; one need only look at how much "extra" time is currently needed to get a packet through the link. That is why, for example, smartphone driving-time estimates for a well-known commute can be a useful indication of road congestion. But that knowledge is not available on the Internet as a whole, so some other approach will be required. 
+
+The CDG approach is to look at the minimum and maximum RTTs observed for a given connection over a period of time. The minimum is called Τmin, while the maximum is Τmax. From subsequent observations of Τmin and Τmax, the algorithm calculates the rate of change of each. The rate at which the minimum RTT is changing is δmin, while the rate at which the maximum RTT is changing is δmax. These two parameters are then used in a couple of interesting ways. 
+
+The key use, of course, is to try to come up with an estimate of how congested the link is. To simplify a bit: if Τmin is growing (δmin is positive), chances are that the link is getting more congested. Every RTT interval, CDG calculates a "probability of backoff" based on δmin; as δmin grows, that probability approaches one. That probability is then compared against a random number to determine whether the congestion window should be decreased; should a decrease be decided upon, the number of packets in the congestion window will be reduced by a configurable factor (0.3 by default). 
+
+In cycles where the algorithm decides not to decrease the congestion window, it will, instead, increase it by one packet. That allows the window to creep upward and continually test the limits of the connection. In theory, the delay-gradient should detect that limit without pushing the connection to the point of packet loss. 
+
+There is an interesting question that comes up at about this point, though: imagine a situation where a system using CDG is sharing a slow link with another system using traditional loss-based congestion control. As RTT increases, the CDG system will back off, but the loss-based system will continue to pump out packets until the router starts dropping things. Indeed, it may increase its transmission rate to soak up the bandwidth that the CDG system is no longer using. If CDG allows itself to be muscled out of a contended link in that manner, one can predict with high confidence that it will not find many users. 
+
+To deal with this problem, the CDG authors developed a heuristic to detect situations where competition with a loss-based system is occurring. If CDG is working properly, a decision to slow down the transmission rate should result in the RTT values getting smaller — δmin and δmax should go negative. If that fails to happen after a few backoff operations, the algorithm will conclude that somebody else is playing by different rules and stop backing off for a while. CDG also remembers the previous maximum value of the congestion window (as the "shadow window"); this value can be used to quickly restore the congestion window in the event of a packet drop. 
+
+CDG's handling of packet drops is interesting. The motivations for using delay gradients are to avoid depending on packet loss as a signal and to avoid slowing transmission in response to packet losses that do not result from congestion. But congestion-related packet loss will still happen when CDG is in use, and the algorithm should respond accordingly. Backing off in response to packet loss is easy; the tricky part is determining whether that loss is a congestion signal or not. 
+
+As a general rule, congestion manifests itself as an overflow of the packet queue for the slowest link used by a connection. If that queue is known to be full, then a packet loss is likely to be a result of the congestion there; if, instead, it is known to be relatively empty, congestion is probably not the problem. The heuristic used to determine the state of the queue is this: when a queue fills, Τmax will reach its largest possible value and stop increasing (because the queue cannot get any longer), but Τmin will continue to increase. CDG will only treat a packet loss as a congestion signal when a full queue has been detected in this manner. 
+
+At least, that is how the algorithm was designed; the current Linux patch does not quite work that way. In the patch posting, Kenneth Klette Jonassen notes that: ""We decided to disable the loss tolerance heuristic by default due to concerns about its safety outside closed environments."" So that aspect of CDG will have to wait until the algorithm's behavior on the full Internet is better understood. 
+
+Even so, networking developer Eric Dumazet [said](<https://lwn.net/Articles/645119/>) that the new congestion-control module ""looks awesome"". Its true level of awesomeness can only be determined via years of real-world experience. But getting CDG into the Linux kernel is a good first step toward the acquisition of that experience. Should things go well, loss-based congestion control might end up backing off in its role on the net. 
+
+(See [this paper [PDF]](<http://caia.swin.edu.au/cv/dahayes/content/networking2011-cdg-preprint.pdf>) for the full details on how the CDG algorithm works.)

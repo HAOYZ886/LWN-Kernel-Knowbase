@@ -1,0 +1,62 @@
+---
+title: When the kernel ABI has to change
+url: https://lwn.net/Articles/557082/
+date: "July 2, 2013"
+category: "Control groups; Development model-User-space ABI"
+author: "By Jonathan Corbet July 2, 2013"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+July 2, 2013
+
+Maintaining user-space ABI compatibility is one of the key guiding principles of Linux kernel development; changes that break user space are likely to be reverted quickly, often after an incendiary message from Linus. But what is to be done in cases where an ABI is deemed to be unworkable and unmaintainable? Control group maintainer Tejun Heo is trying to solve that problem, but, in the process, he is running into opposition from one of Linux's highest-profile users. 
+
+Control groups ("cgroups") allow an administrator to divide the processes in a system into a hierarchy of groups; this hierarchy need not match the process tree. The grouping function alone is useful; systemd uses it to keep track of all of the processes involved with a given service, for example. But the real purpose of control groups is to allow resource control policies to be applied to the processes within each group; to that end, the kernel contains a range of "controllers" that enforce policies on CPU time, block I/O bandwidth, memory usage, and more. Control groups are managed with a virtual filesystem exported by the kernel; see [Documentation/cgroups/cgroups.txt](<https://lwn.net/Articles/557096/>) for a thorough (if slightly dated) description of how this subsystem works. 
+
+#### The trouble with control groups
+
+There is no doubt that the functionality provided by control groups is both extensive and flexible. Indeed, part of the problem is that it is _too_ flexible. Consider, for example, the support for multiple hierarchies in the control group subsystem. Cgroups allow the creation of a hierarchy of processes to be used in dividing up a limited resource, such as available CPU time. But they allow the creation of an entirely different hierarchy for the control of a different resource. Thus, for example, CPU time could be placed under a policy that favors certain users over others, while memory use could, instead, be regulated depending on what program a process is running. Processes can be grouped in entirely different ways in each hierarchy. 
+
+The problem here is that, while the design allowing each controller to have its own hierarchy seems nice and orthogonal, the implementation cannot be that way. The controllers for memory usage, I/O bandwidth, and writeback throttling all look independent on the surface, but those problems are all intertwined in the memory management system in the kernel. All three of those controllers will need to associate pages of memory with specific control groups; if a given process is in one cgroup from the memory controller's point of view, but a different cgroup for the I/O bandwidth controller, that tracking quickly becomes difficult or impossible. It is easy to set up policies that conflict or that simply cannot be properly implemented within the kernel. 
+
+Another perceived problem is that the virtual filesystem interface is too low-level, exposing too many details of how control groups are implemented in the kernel. As the number of users of control groups grows, it will become increasingly hard to make changes without breaking existing applications. It's not clear what the correct cgroup interface should be, but those who spend enough time looking at the current implementation tend to come away convinced that changes are needed. 
+
+This problem is aggravated by an increasing tendency to use file permissions to hand subtrees of a cgroup hierarchy over to unprivileged processes. There are legitimate reasons to want to delegate authority in that way; complex applications may want to use cgroups to implement their own internal policies, for example. There are also use cases associated with virtualization and containers. But that delegation greatly increases the number of programs with an intimate understanding of how cgroups work, complicating any future changes. There are also any number of security issues that come with unprivileged access to a cgroup hierarchy; it is trivially easy to run denial-of-service attacks against a system if one has write access to a cgroup hierarchy. In short, the interface was just never meant to be used in this way. 
+
+For these reasons and more, there is a strong desire to rework the cgroup interface into something that is more maintainable, more secure, and easier to use. Getting there, though, is likely to be a long and painful process, as can be seen by the early discussions around the subject. 
+
+#### The solution and its discontents
+
+The plan for control groups can be described in relatively few words; the resulting discussion, instead, is rather more verbose. Multiple hierarchies are seen to be misconceived and unmaintainable on their face; the plan is to phase out that functionality so that, in the end, all controllers are attached to a single, unified hierarchy of processes. Unprivileged access to the cgroup hierarchy will be strongly discouraged; the hope is to have a single, privileged process handling all of the cgroup management tasks. That process will, in turn, provide some sort of higher-level interface to the rest of the system. 
+
+Tim Hockin is charged with making Google's massive cluster of machines work properly for a wide variety of internal users. Google uses cgroups extensively for internal resource management; more to the point, the company also makes extensive use of multiple hierarchies. So, needless to say, Tim is not at all pleased with the prospect of that functionality going away. As he [put it](<https://lwn.net/Articles/557101/>): 
+
+So yeah, I'm in a bit of a panic. You're making a huge amount of work for us. You're breaking binary compatibility of the (probably) largest single installation of Linux in the world. And you're being kind of flip about the reality of it... 
+
+[PULL QUOTE:  The kernel's ABI rules have not been suspended for control groups  END QUOTE] Part of the reason for Tim's panic is that he was under the impression that the existing functionality would be removed within a year or two. That is decidedly not the case; the kernel's ABI rules have not been suspended for control groups. The plan is to add a new control interface, and any new features will probably only work with that new interface, but the existing interface, including multiple hierarchies, will continue to be supported until it's clear that it is no longer being used. 
+
+Tim [described](<https://lwn.net/Articles/557102/>), in general terms, how Google uses multiple hierarchies. Essentially, every job in the system has two attributes: whether it's a production or "batch" job, and whether it gets I/O bandwidth guarantees. The result is a 2x2 matrix describing resource allocation policies (though one of the entries — batch processes with I/O guarantees, makes little sense and is not used). Using two independent cgroup hierarchies makes this set of policies relatively easy to express; Tim asserts that a unified hierarchy would not be usable in the same way. 
+
+Tejun was unimpressed, [responding](<https://lwn.net/Articles/557103/>) that this case could be managed by setting up three cgroups at the same level of the hierarchy, each of which would implement one of the three useful policy combinations. The problem with this solution, according to Tim, is that the processes without I/O bandwidth guarantees would be split into two groups, whereas in the current solution they are in one group. If one of those two groups has far more members than the other, the members of that larger group will get far less of the available bandwidth than the members of the small group. Tejun still thinks that the problem should be solvable, perhaps with the use of a user-space management daemon that would adjust the relative bandwidth allocations depending on the workload. Tim has [answered](<https://lwn.net/Articles/557109/>) that the situation is actually a lot more complicated, but he has not yet shared the details of how, so it is hard to understand what the real difficulties with a single hierarchy are. 
+
+#### A single management process?
+
+Tim also dislikes the plan to have a single process managing the control group hierarchy. That process could be made to provide the functionality that Google (along with others) needs, though there are performance concerns associated with adding a process in the middle. But Tim was not alone in being concerned by [this message from Lennart Poettering](<https://lwn.net/Articles/555922/>) on the nature of that single process: 
+
+This hierarchy becomes private property of systemd. systemd will set it up. Systemd will maintain it. Systemd will rearrange it. Other software that wants to make use of cgroups can do so only through systemd's APIs. 
+
+Google does not currently run systemd and is not thrilled by the prospect of having to switch to be able to make use of cgroup functionality. So Tim [responded](<https://lwn.net/Articles/557112/>) that ""If systemd is the only upstream implementation of this single-agent idea, we will have to invent our own, and continue to diverge rather than converge."" There is no particular judgment against systemd implied by that position; it is simply that making that switch would affect a whole lot of things beyond cgroups, and that is more than Google feels like it would want to take on at the moment. But, in general, it would not be surprising if, in the long term, some users remain opposed to the idea of systemd as the only interface to cgroups. That suggests that we will be seeing competing implementations of the cgroup management daemon concept. 
+
+One of those alternatives may be about to come into view; Serge Hallyn [confessed](<https://lwn.net/Articles/557110/>) that he is working on a cgroup management daemon of his own. In some situations, a separate daemon might meet a lot of needs, but Lennart was [clear](<https://lwn.net/Articles/557111/>) that he would never have systemd defer to such a daemon. His position — not an entirely unreasonable one — is that the init process, as the creator of all other processes in the system, should not be dependent on any other process for its normal operation. He also [seems to feel](<https://lwn.net/Articles/557140/>) that it would not be possible to put the cgroup management code into a library that could be used in multiple places. So we are likely to see multiple implementations of this functionality in use before this story is done. That, in turn, could create headaches for developers of applications that need to interface with the cgroup subsystem. 
+
+The discussion, thus far, seems to have changed few minds. But Tejun has [made it clear](<https://lwn.net/Articles/557113/>) that he doesn't intend to just ignore complaints from users: 
+
+While the bar to overcome is pretty high, I do want to learn about the problems you guys are foreseeing, so that I can at least evaluate the graveness properly and hopefully compromises which can mitigate the most sore ones can be made wherever necessary. 
+
+He also [acknowledged](<https://lwn.net/Articles/557114/>) the biggest problem faced by the development community: despite having accumulated some experience on wrong ways to solve the problem, nobody really knows what the right solution is. More mistakes are almost certain, so it's too soon to try to settle on final solutions. 
+
+In the early years of Linux, most of the ABIs implemented by the kernel were specified by groups like POSIX or by prior implementation in other kernels. That made the ABI design problem mostly go away; it was just a matter of doing what had already been done before. For current problems, though, there are rather fewer places to look for guidance, so we are having to figure out the best designs as we go. Mistakes are certain to happen in such a setting. So we are going to have to get better at learning from those mistakes, coming up with better designs, and moving to them without causing misery for our users. The control group transition is likely to set a lot of precedents regarding how these changes should (or should not) be handled in the future.

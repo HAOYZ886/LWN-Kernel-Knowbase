@@ -1,0 +1,19 @@
+---
+title: The kernel and binary firmware
+url: https://lwn.net/Articles/130696/
+date: "April 6, 2005"
+category: Copyright issues; Firmware
+author: 
+---
+
+Device firmware is a perennial issue in certain circles. As long as non-free firmware is safely contained within the device it controls, everybody seems to be happy. Increasingly, however, firmware must be loaded from the host system. People who want no non-free software on their computers resist the idea of having binary-only firmware linked into their kernel. Certain Debian developers have long tried to extract all non-free firmware from their distribution. Recently, the issue has [come up again](<https://lwn.net/Articles/130700/>) with a new twist: the fear that, even if a firmware blob comes with a free license, it cannot be distributed as part of the kernel because it's not in "the preferred form for modification." 
+
+The form of a solution to everybody's concerns has been available for some time: extract the firmware from the kernel source, and load it from user space at device initialization time. The firmware can then carry its own license, worries about conflicts with kernel licensing can go away, and distributors can judge each firmware blob's free software credentials using their own criteria. It would seem like a solution which would make everybody happy; the reality, however, is that this approach has not been taken in many cases. One might conclude that nobody (not even the most vocal complainers) has been sufficiently motivated to get into the code and actually pull out the firmware in this manner. There is some truth to that claim, but there is also a little more going on. The simple fact is that the infrastructure needed to make the user-space firmware mechanism work well is not ready. 
+
+The kernel contains support for user-space firmware loading by way of [`request_firmware()`](<https://lwn.net/Articles/32997/>). When a driver decides it needs a firmware blob to feed its device, it can call `request_firmware()`; that call will result in a hotplug event. User space can then see which device's firmware is needed, locate it in the filesystem, and feed it back to the driver. 
+
+One problem with this interface is that it is too simple. Some hardware, notably the tg3 network adaptor, does not want a simple firmware blob. Instead, its firmware looks like a regular executable image - it has text, read-only data, and writable data sections. There is also associated metadata needed for the driver to actually load the firmware into the card. To accommodate complex devices like the tg3, somebody will have to extend the `request_firmware()` interface; that work has not yet happened. 
+
+Once that issue has been dealt with, there is still the problem of actually getting the firmware onto the system. Loading the firmware often must be done before the host system will function in any useful way, so it must be present on a freshly-installed system. Often, it will have to be part of the initrd or initramfs image used at boot time. There is thus a clear case for packaging the firmware as part of the kernel source itself; the two depend on each other anyway. That solution would clearly displease some users, however, so a separate firmware distribution seems called for. Mechanisms will need to be put into place so that user space knows where to find the firmware distribution, so that the kernel build process can create bootable kernels, etc. 
+
+These problems are all clearly amenable to solution; it is simply a matter of a suitably-motivated developer finding the time to do the work. Whether that will happen remains to be seen; most of the commercial distributors, who might be expected to fund this sort of infrastructural work, do not appear to be overly concerned about the firmware issue. So solving this problem may fall on the Debian developers, and they have a few other things on their plate at the moment.

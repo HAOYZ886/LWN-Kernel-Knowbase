@@ -1,0 +1,97 @@
+---
+title: "Unioning file systems: Architecture, features, and design choices"
+url: https://lwn.net/Articles/324291/
+date: "March 18, 2009"
+category: "Filesystems-Union"
+author: "March 18, 2009 This article was contributed by Valerie Aurora"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+March 18, 2009
+
+This article was contributed by Valerie Aurora
+
+A unioning file system combines the namespaces of two or more file systems together to produce a single merged namespace. This is useful for things like a live CD/DVD: you can union-mount a small, writable file system on top of a read-only DVD file system and have a usable system without needing to transfer the system files from the DVD to the root file system. Another use is to export a single read-only base file system via NFS to multiple clients, each with their own small, writable overlay file system union mounted on top. Another use might be a default set of files for a home directory. 
+
+Unioning file systems of various sorts have been around since at least the Translucent File Service (or File System), written around 1988 for SunOS. BSD has had union mounts since 4.4 BSD-Lite, around 1994, and Plan 9 implemented union directories in a similar time frame. The first prototype of a union-style file system for Linux was the [Inheriting File System (IFS)](<http://icapeople.epfl.ch/almesber/ifs.html>), written by Werner Almsberger for Linux 0.99 in 1993. It was later abandoned, as Werner writes, because ""I looked back at what I did and was disgusted by its complexity."" Later implementations for Linux include [unionfs](<http://www.filesystems.org/project-unionfs.html>) (2003), [aufs](<http://aufs.sourceforge.net/>) (2006), and [union mounts](<http://lwn.net/Articles/312641/>) (2004), as well as FUSE prototypes and implementations of various forms. So how is it that in 2009, Linux still does not have an in-tree unioning file system? 
+
+The short answer is that none of the existing implementations meet the kernel maintainers' standards of simplicity, clarity, and correctness. What makes it so difficult to write a unioning file system that meets these standards? In this week's article, we'll review general unioning file system concepts, and common design problems and solutions. In a subsequent article, we'll review the top contenders for a mainline kernel unioning file system for Linux, as well as unioning file systems for other operating systems. 
+
+### Unioning file systems implementation guidelines
+
+First, let's define what a useful unioning file system implementation would look like. The basic desire is to have one read-only file system, and some sort of writable overlay on top. The overlay must persistently store changes and allow arbitrary manipulation of the combined namespace (including persistent effective removal of parts of the read-only namespace - "whiteouts"). The implementation should be fast enough for use as a root file system, and should require little or no modification of underlying file systems. It should be implemented in the kernel; FUSE-based file systems have many uses but aren't appropriate for many use cases (root file systems, embedded systems, high (or even moderate) file system performance, etc.). 
+
+A successful unioning file system will be an improvement (in terms of disk space used, cost of code maintenance, deployment time, etc.) over the alternatives - copying over all the files up front, clever division of file systems into multiple mount points, or writing an entire new on-disk file system. If we gain all the features of a unioning file system, but complicate the VFS code too much, we'll have a union file system at the cost of a slow, unmaintainable, buggy VFS implementation. If a union file system includes as much or more code than the underlying file system implementations, you start to wonder if supporting unioning in underlying file systems individually would be more maintainable. 
+
+One alternative to unioning file systems is the copy-on-write block device, often used for virtualized system images. A COW block device works for many applications, but for some the overhead of a block device is much higher than that of a unioning file system. Writes to a file system on a COW block device will produce many duplicated blocks as the bitmaps, journals, directory entries, etc. are written. A change that could be encapsulated in a few bytes of directory entry in a unioning file system could require several hundred kilobytes of change at the block level. Worse, changes to a block device tend only to grow; even with content-based block merging (not a common feature), two file systems which are logically nearly identical may differ by many megabytes at the block level. An important case is one in which you delete many files; with a unioning file system this will decrease the space needed to store differences. With a COW block device, used space will increase. 
+
+One problem that should NOT be solved by unioning file systems (and file systems in general) is source control. Modern source control systems are quite good compared to the crud we had to live with back in the 1990's. Source control software back then was so buggy and slow that it actually seemed like a good idea to implement parts of it in the kernel; indeed, some commercially successful source control systems still in use today require explicit file system support. Nowadays, many fast, reliable source control systems are available and it is generally agreed that complex and policy-heavy software should be implemented outside of the kernel. (Those who disagree are welcome to write gitfs.) 
+
+### General concepts
+
+Most unioning file systems share some general concepts. This section describes branches, whiteouts, opaque directories, and file copy up. 
+
+Branches are the various file systems that are unioned together. Branch access policies can be read-only, writable, or more complex variations which depend on the permissions of other branches. Branches are ordered or stacked; usually the branch "on top" is the writable branch and the branch "on the bottom" is read-only. Branches can sometimes be re-ordered, removed, added, or their permissions changed on the fly. 
+
+A commonly required feature is that when a particular directory entry is deleted from a writable branch, that directory entry should never appear again, even if it appears in a lower branch. That is, deleting a file named "x" should result in no file named "x" in that directory afterward, even if a file named "x" exists in a lower branch. Usually this is implemented through a combination of whiteouts and opaque directories. A whiteout is a directory entry that covers up all entries of a particular name from lower branches. An opaque directory does not allow any of the namespace from the lower branches to show through from that point downwards in the namespace. 
+
+When a file on a read-only branch is altered, it must be copied up to some writable branch. Copy up is usually triggered either when the file is opened with write permissions, or when the first write to the file's data or metadata occurs. 
+
+### Common design problems
+
+Unioning file systems often run into the same difficult design problems. Often, these problems only have a few obvious options with built-in tradeoffs, and unioning file systems can be characterized to some degree by which set of tradeoffs they choose. In this section, we'll review some of the top design problems and their common solutions. 
+
+**Namespace pollution** : Often, whiteouts, opaque directories, persistent inode numbers, and any other persistent file system data are stored in specially-named files. These files clutter up the available namespace and produce unexpected behavior. Some minor namespace pollution has been acceptable in UNIX as long as it is restricted to the top-level directory (think "`/lost+found`"), but namespace pollution on a per-directory or per-file basis is generally frowned on. Solutions to this problem include various ways of shuffling around the namespace pollution - moving it to a single subdirectory per directory or file system or storing it in an external file system - or not creating namespace pollution in the first place (which generally requires support from the underlying file system). 
+
+**Whiteouts and opaque directories** : While the concepts of whiteouts and opaque directories are fairly general, the implementation varies. The most common option is to create a directory entry with a special name, such as "`.wh.<filename>`" which indicates that the corresponding directory entry should never be returned. This can cause clashes with user file names and prevent stacking one union over another. It also makes directory removal time-consuming. An "empty" directory can have many thousands of whiteout entries which must be deleted before the `rmdir()` can complete. Sometimes directory removals are pushed off to a special work thread to improve `rmdir()` latency. 
+
+Another option is to create a special file or directory entry type to mark whiteout directory entries, and give whiteout directory entries a reserved inode number. The name in the directory entry itself is the same as the name being whited out and does not appear in directory listings. This form of whiteouts requires support from the underlying file system to store the necessary flags and from the file system utilities to accept the special entries. One more option is to make whiteout entries be hard links to special whiteout files, or symbolic links to reserved targets. The hard link solution requires handling the case of exceeding the maximum link count on the target file. 
+
+Directories can be marked opaque with either a flag in the directory inode (again requiring support from the underlying file system) or with a directory entry with a reserved name, like "`.opaque`". 
+
+**Timing of directory copies** : When a file is created on a writable branch in a directory that exists only on another branch, the entire directory path to that file must be present on the writable branch. The path can be created on-demand when the target file is copied, or each directory may be preemptively copied to the writable branch as it is opened. Creating paths on demand introduces complexity, locking issues, and additional latency on file writes. Creating paths on directory open simplifies code and improves latency on file write, but uses up additional (often negligible) space on the writable branch. 
+
+**Kernel memory usage** : Unioning file systems often introduce new data structures, extra copies of data structures, and a variety of cached metadata. For example, a union of two file systems may require three VFS inodes to be allocated for one logical object. The most common implementation of whiteouts and duplicate entry removal requires reading all directory entries from all branches into memory and constructing a coherent view of the directory there. If this cache is maintained across system calls, we have to worry about regenerating it when underlying branches change. When it is not cached, we have to reallocate memory and remerge the entries repeatedly. Either way, a lot of kernel memory must be allocated. 
+
+**Code cleanliness** : One of the main points of a unioning file system is to reuse existing file system code, with the expected benefits in ease of maintenance and future development in that code base. If the implementation is excessively complex or intrusive, the net effect will be a reduction in ease of maintenance and development. The sheer number and variety of Linux file systems (on-disk, in-memory, and pseudo) demonstrates the benefit of clean and simple file system interfaces. 
+
+**Stack depth** : The Linux kernel has a limited available stack depth. Calling internal file system functions from unexpected code paths or, worse yet, recursively, can easily result in exceeding the kernel stack limit. Some unioning file systems are implemented as stacked or layered file systems, which inherently add to stack depth. 
+
+**Number of branches** : Memory usage is often proportional to the number of branches in use. Branches may be limited to a compile-time maximum, but allocating enough memory for the maximum is prohibitive. Dynamic allocation and reallocation as branches are added and removed can be complex and introduce new opportunities for failure. 
+
+**Coherency of changes** : A common feature request is to allow modification of more than one branch at once. This requires some method of cache coherence between the various parts of the file system. Usually this method is absent or only partially correct. Users often request direct access to the file systems making up the branches of the union (instead of access through the unioning file system), a situation particularly difficult to deal with. 
+
+**Dynamic branch management** : Users often would like to add, remove, or change the policies of branches in a union while the union is still mounted. In trivial cases, this is a simple matter of parsing mount options and manipulating data structures, but may have major effects on any cache coherency implementation. 
+
+**readdir() and friends** : One of the great tragedies of the UNIX file system interface is the enshrinement of `readdir()`, `telldir()`, `seekdir()`, etc. family in the POSIX standard. An application may begin reading directory entries and pause at any time, restarting later from the "same" place in the directory. The kernel must give out 32-bit magic values which allow it to restart the `readdir()` from the point where it last stopped. Originally, this was implemented the same way as positions in a file: the directory entries were stored sequentially in a file and the number returned was the offset of the next directory entry from the beginning of the directory. Newer file systems use more complex schemes and the value returned is no longer a simple offset. To support `readdir()`, a unioning file system must merge the entries from lower file systems, remove duplicates and whiteouts, and create some sort of stable mapping that allows it to resume `readdir()` correctly. Support from userspace libraries can make this easier by caching the results in user memory. 
+
+**Stable, unique inode numbers** : NFS exports and some applications expect inode numbers of files not to change between mounts, reboots, etc. Applications also expect that files can be uniquely identified by a combination of the device id and the inode number. A unioning file system can't just copy up the inode number from the underlying file system since the same inode is very likely to be used on more than one file system. Unique (but not stable) inode numbers can be implemented fairly trivially, but stable inode numbers, require some sort of persistent state mapping files from the underlying file system to assigned inode numbers. 
+
+**mmap()** : `mmap()` is always the hard part. A good way to sound smart without knowing anything about file systems is to nod sagely and say, "What about `mmap()`?" `mmap()` on a file in a union file system is hard because the file may suddenly disappear and be replaced with another (copy up of a file on write from another process) or can be changed without the cooperation of the unioning file system (direct writes to the file systems backing branches). Some unioning file systems permit forms of `mmap()` which are not correctly implemented according to the POSIX standard. 
+
+**rename() between branches** : `rename()` is a convenient system call that allows atomic file renames on the same file system. Some unioning file systems try to emulate `rename()` across different branches. Others just return EXDEV, the error code for an attempted `rename()` across different file systems. Most applications can cope with the failure of `rename()` and fall back to a normal file copy. 
+
+**File system implementation differences** : Different file systems have different rules about permitted file names, allowed characters, name length, case sensitivity, extended attribute names and sizes, etc. The unioning file system wants to translate from one file system's rules to another. Some union file systems just restrict the types of file systems they support rather than implement complex translation code for uncommon use cases. 
+
+**Multiple hard links** : A file on a lower branch may have multiple hard links; that is, multiple paths point to the same inode. When a file with multiple hard links on a read-only branch is altered, strict UNIX semantics require finding all the other paths to that file and copying them to the writable branch as well. Unfortunately, UNIX file systems generally don't provide an efficient way to find all the paths to an inode. Some union file systems keep a list of inodes with undiscovered alternate paths and copy them over when a new path is accessed, others just ignore the problem. It's an open question as to how many applications depend on the correct behavior of hard links when used in this manner. 
+
+**Permissions, owner, and timestamps** : These attributes are often calculated using using a combination of underlying file system permissions, options specified on mount, the user and umask at time of mount, and branch management policies. Exact policies vary wildly. 
+
+**Feature creep** : Sometimes, the features provided by unioning file systems go beyond the actual needs of 99.9% of unioning use cases. This may be the result of fanciful user requests, or a "just because we can" approach \- users only ask for two or three branches, but it's possible to support thousands of branches, so let's do it, or the code is structured such that all combinations of X, Y, and Z features are trivial to implement, even though users only want X and Y or Y and Z. Each feature may seem nearly free, but often ends up constraining the implementation or providing new opportunities for bugs. Focus is important. 
+
+### Summary
+
+Union file systems are inherently difficult to implement for many reasons, but much of the complexity and ugliness come from solving the following problems: whiteouts, `readdir()` support, stable inode numbers, and concurrent modifications to more than one branch at a time. Few of these problems have obviously superior solutions, only solutions with different tradeoffs. 
+
+### Coming next
+
+In the next article, we will review BSD union mounts, unionfs, aufs, and Linux union mounts. For each of these unioning file systems, we'll look at specific implementation details, including kernel data structures and their solutions to the various union file system problems described in this article. We'll also review the issues surrounding merging each solution into the mainline Linux kernel. We'll wrap up with general analysis of what does and doesn't work for unioning file systems, from both a purely technical and a software engineering point of view. 
+
+To be continued... 
+
+#### Acknowledgements
+
+Many discussions with developers helped with the background of this article, but this article in particular benefited from discussions with Erez Zadok, Christoph Hellwig, and Jan Blunck.

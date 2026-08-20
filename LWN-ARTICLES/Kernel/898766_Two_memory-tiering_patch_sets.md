@@ -1,0 +1,54 @@
+---
+title: "Two memory-tiering patch sets"
+url: https://lwn.net/Articles/898766/
+date: "June 27, 2022"
+category: "Memory management-Tiered-memory systems"
+author: "By Jonathan Corbet June 27, 2022"
+---
+
+> **Benefits for LWN subscribers**
+> 
+> The primary benefit from [subscribing to LWN](<https://lwn.net/Promo/nst-nag5/subscribe>) is helping to keep us publishing, but, beyond that, subscribers get immediate access to all site content and access to a number of extra site features. Please sign up today! 
+
+By **Jonathan Corbet**  
+June 27, 2022
+
+Once upon a time, computers just had one type memory, so memory within a given system was interchangeable. The arrival of non-uniform memory access (NUMA) systems complicated the situation significantly; now some memory was faster to access than the rest, and memory-management algorithms had to adapt or performance would suffer. But NUMA was just the start; today's tiered-memory systems, which may include several tiers of memory with different performance characteristics, are adding new challenges. A couple of relevant patch sets currently under review help to illustrate the types of problems that will have to be solved. 
+
+The core challenge with NUMA systems is ensuring that memory is allocated on the nodes where it will be used. A process that is running mostly from memory on its local node will perform better than one that is working with a lot of remote memory. So finding the right place for a given page is a one-time task; once that page and its users have found their way to the same NUMA node, the problem is solved and the only remaining concern is to avoid separating them again. 
+
+Tiered memory is built on the NUMA concept, but there are some differences. A bank of memory can be represented as a NUMA node that lacks a CPU, so that memory will not be seen as local to any process in the system. As a general rule, memory on these CPU-less nodes is slower than normal system DRAM — it might be a large bank of persistent memory, for example — but that is not necessarily the case, as we will see below. 
+
+Since memory on a CPU-less node is not local to any process, there must be some other criterion that regulates the allocation of memory there. The approach that is being taken is to demote pages to such a node from faster DRAM using the kernel's normal reclaim mechanisms; in a situation where a page would otherwise have been evicted or pushed to swap, it can be moved to slower memory instead. That makes use of the slower memory while keeping that page available should it turn out to still be useful. Eventually, if that page sits unused in the slower tier, it can be pushed to an even slower tier or evicted entirely. 
+
+Demoting pages to slower tiers cannot be a one-way operation, though, or performance will suffer; some of those pages will end up being accessed frequently and keeping them in slow memory will slow things down. So there needs to be a mechanism for promoting pages back to faster memory. Simply moving a page back to fast memory on the first access after demotion would be one possible approach, but that would also promote infrequently used memory and would likely create a lot of movement of pages between tiers, which would have significant costs of its own; a better solution is called for. 
+
+#### Hot-page selection
+
+The [hot-page selection patch set](<https://lwn.net/ml/linux-kernel/20220622083519.708236-1-ying.huang@intel.com/>) from Huang Ying is an attempt to find that better solution. The approach taken is to try to estimate the frequency of accesses to each slow-tier page, and to promote those that are accessed most often. There is no access counter for pages, though, so some sort of heuristic is required. The specific approach is to occasionally scan through slow-tier memory, setting the individual page protections to `PROT_NONE` (no access). When this is done, the current time is shoehorned into the associated `page` structure. An attempt to access the page will generate a fault, at which point the previous permissions can be restored and the faulting process can continue. But the kernel can also compare the current time to the timestamp that was stored previously; if that time is short enough, the conclusion is that the page is accessed frequently and should be promoted. 
+
+What is "short enough"? The [initial patch](<https://lwn.net/ml/linux-kernel/20220622083519.708236-2-ying.huang@intel.com/>) in the series sets the threshold to one second, a value ""which works well in our performance test"". That patch also points out some shortcomings with this approach; the right threshold will be highly workload-dependent, and the promotion mechanism will respond slowly to changes in access patterns. If a set of pages that have sat in slow memory for some time suddenly becomes hot, the first accesses will still appear slow, and those pages will have to go through another scan cycle before being promoted. 
+
+In an attempt to mitigate that last problem, the access-time threshold will not be applied if there is an abundance of free fast memory. If the resources are available, in other words, pages will simply be promoted even if it seems that they are not being used often. When that can't happen, though, then the access-time test still applies, and the one-second value might not work for all workloads. Ying notes that there does not seem to be a way for users to try to configure that value themselves in a reasonable way, so no knob to do that configuration is provided. 
+
+Instead, the series adds a knob to limit the number of page promotions performed per second, expressed as a MB/s bandwidth value. Once the rate limit has been hit for a given time period, promotions will stop for a while, preventing excessive page promotions from overwhelming the system and hurting performance in their own right. The last step is to adjust the access-time threshold dynamically so that the number of pages that are eligible for promotion approximately matches the configured promotion limit. Thus, if too many pages are being chosen for promotion, the threshold will be made tighter, focusing the algorithm on the most frequently accessed pages. 
+
+Benchmark results provided with the patch set show some significant performance improvements with the new algorithm. In response to a previous posting of the patch set, though, Johannes Weiner [suggested a simpler approach](<https://lwn.net/ml/linux-kernel/YqipqdGwNqQDxb%2F6@cmpxchg.org/>), which is evidently in use at Meta. It uses the current least-recently-used (LRU) mechanism that regulates memory eviction in general, with the end result that pages will be promoted on the second access. Ying [answered](<https://lwn.net/ml/linux-kernel/98651df913231327d5167116b65de26c7d390a2c.camel@intel.com/>) that the LRU is good for identifying cold pages, but is less effective at identifying hot pages. Weiner did not respond further. At this point, the future of this patch set is not clear, but it does appear to provide a solution that's needed, in one way or another, in the mainline kernel. 
+
+#### Rethinking tier assignment
+
+The assignment of CPU-less NUMA nodes to slower memory tiers has been an effective heuristic in the early days of support for tiered memory. But, as Aneesh Kumar K.V points out in [this patch series](<https://lwn.net/ml/linux-kernel/20220622082513.467538-1-aneesh.kumar@linux.ibm.com/>), the real world is inevitably more complicated than that. A CPU-less node _might_ be populated with slower memory, but it could also hold memory that is as fast as — or faster than — normal system DRAM. Examples would include a virtual node backed by DRAM in a virtual machine, [CXL memory](<https://lwn.net/Articles/894598/>) behind a fast interconnect, or [high-bandwidth memory](<https://en.wikipedia.org/wiki/High_Bandwidth_Memory>) provided by a specialized device. Treating such memory as being slower will deprive the system of its benefits. The cover letter also points out that a CPU hot-add event might cause a CPU-less node to contain a CPU and be moved to a different tier, even though the characteristics of the memory in that node have not changed. 
+
+The proposed solution is to replace the kernel's simplistic tiering setup with something a bit more sophisticated and explicit. Current kernels do not really identify "tiers" as such; instead, they order nodes into an internal "demotion order" that is a function of the reported node distance; this order is not readily visible from user space and cannot be changed. The patch set turns tiers into a proper kernel object and enables the creation of an arbitrary number of user-visible tiers, each identified (and ordered) by an integer ID value. Higher-numbered tiers are expected to contain faster memory. 
+
+The default tier has ID 200 (internally named `MEMORY_TIER_DRAM`), and all nodes with memory start out in that tier. Drivers for devices containing memory are able to request that their memory is placed into a different tier. Two other tiers are build into the patch set for this use: `MEMORY_TIER_HBM_GPU` (300) for high-bandwidth memory, and `MEMORY_TIER_PMEM` (100) for persistent memory. If a driver knows that its device has one type of memory or the other, it can place that memory into the appropriate tier. 
+
+The patch series also provides a set of files in sysfs (described in the cover letter and [this documentation patch](<https://lwn.net/ml/linux-kernel/20220622082513.467538-12-aneesh.kumar@linux.ibm.com/>)) that can be used to examine the current memory-tier configuration. New tiers can be created from user space, and nodes can be moved between tiers using the sysfs interface. The patch set also makes the demotion policy used to move pages to slower tiers more explicit and configurable. 
+
+Weiner [responded](<https://lwn.net/ml/linux-kernel/YqCq0cUCnQmS6SV4@cmpxchg.org/>) to an earlier version of the patch set by questioning the assignment of all nodes to the same tier, regardless of whether they contain a CPU: 
+
+> Making tiers explicit is a good idea, but can we keep the current default that CPU-less nodes are of a lower tier than ones with CPU? I'm having a hard time imagining where this wouldn't be true... Or why it shouldn't be those esoteric cases that need the manual tuning. 
+
+That behavior remains unchanged in the current version of the patch set, though. 
+
+In any case, the default tier-assignment policy is an easy thing to change at any future point. The overall structure of a mechanism to make tiers into explicit objects could be rather harder to change once it's merged and its sysfs files become part of the kernel API. That aspect of the patch set does not appear to be controversial, though; after seven revisions, most of the review comments have been addressed. So, while there may be space for a tweak or two, this work seems to be about ready to be merged.

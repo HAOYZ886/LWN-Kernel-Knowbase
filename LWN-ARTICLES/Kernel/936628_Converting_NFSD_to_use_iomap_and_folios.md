@@ -1,0 +1,74 @@
+---
+title: Converting NFSD to use iomap and folios
+url: https://lwn.net/Articles/936628/
+date: "July 4, 2023"
+category: "Filesystems-NFS"
+author: "By Jake Edge July 4, 2023 LSFMM+BPF"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jake Edge**  
+July 4, 2023
+
+* * *
+
+[LSFMM+BPF](<https://lwn.net/Articles/lsfmmbpf2023>)
+
+Chuck Lever led a filesystem session at the [2023 Linux Storage, Filesystem, Memory-Management and BPF Summit](<https://lwn.net/Articles/lsfmmbpf2023>) on the Linux NFS server, which is also known as NFSD. He wanted to talk about converting the network filesystem to use iomap; that kind of conversion was the topic of the [previous session](<https://lwn.net/Articles/935934/>) at the summit. Beyond that, he wanted to discuss using folios, which has been a frequent topic at recent LSFMM+BPF gatherings, including [this year](<https://lwn.net/Articles/931794/>). 
+
+Lever began with the announcement that NFSD is "under new management". Bruce Fields, who had been the maintainer since 2007 or so, has taken a sabbatical from the IT world ("he is well, I am not trying to cover anything up there"). Lever became the maintainer of NFSD for the kernel in January 2022 and Jeff Layton joined him as co-maintainer in July 2022. 
+
+The Linux NFSD has some features that no other implementation in the industry has, including NFS over RDMA, with support for "just about any fabric you can imagine"; the NFS client also works over RDMA. Support for NFS v4.2, which is pretty rare in other implementations, is also present; "those are things that we can be proud of and I hope I can extend that winning streak a little bit". 
+
+[ ![\[Chuck Lever\]](https://static.lwn.net/images/2023/lsfmb-lever-sm.png) ](<https://lwn.net/Articles/937245/>)
+
+His first priority is functionality, thus making sure that Linux stays at the top of the list for NFS. Next is security; to that end, he has been working on both GSS/Kerberos and RPC using TLS. The latter is a way to do in-transit encryption of NFS traffic without using Kerberos; the cloud people have been asking for it since 2018 and he thinks the NFSD project is just about in a position to deliver it. His third priority is performance and scalability for the server, which is the topic of the talk. Fourth is the ability to trace the operation of the live server and diagnose problems with it, but without impacting its operation. He is "way into tracepoints" and has been putting them into the server; he has not yet gotten into BPF, though he plans to. 
+
+He has gotten some anecdotal reports that NFS reads from the server are slow; for 20 years or so, the server has used a "[pipe-splice](<https://www.kernel.org/doc/html/v5.9/filesystems/splice.html>) mechanism" for reads; that mechanism is "poorly documented and we broke it pretty badly last year" in a few different ways. Al Viro broke it with his pipe-iterator work and Lever broke it when he removed some code that had no documentation and looked unnecessary. "Now we know what we need it for", he said with a chuckle. 
+
+He has not measured these read performance problems himself, but he would like to pay some attention to them soon. Meanwhile, though, NFSD wants to join with some of the other Linux filesystems to "support folios and iomap and all of those wonderful things". There are some unrelated problems with write performance, he said. Both read and write rely on the [`struct xdr_buf` structure](<https://elixir.bootlin.com/linux/v6.4.1/source/include/linux/sunrpc/xdr.h#L43>), which he put up as his only "slide"; it is the "basic way that we track the assembly of RPC messages". It contains a pointer to an array of pages for the data, along with two [`struct kvec`](<https://elixir.bootlin.com/linux/v6.4.1/source/include/linux/uio.h#L18>) entries for the RPC header and the tail information (such as a checksum or padding to a four-byte boundary). There are some other entries to support zero-copy operations as well. 
+
+There is a [`struct bio_vec`](<https://elixir.bootlin.com/linux/v6.4.1/source/include/linux/bvec.h#L19>) entry in the `xdr_buf`, which was put in when the NFS developers thought that "`bio_vec`s were the wave of the future". The NFS client uses that entry, but "the server kind of ... doesn't"; one of the things that has stopped him from using the `bio_vec` in the server is that the APIs for some things, like RDMA, do not support using it. The socket APIs do support `bio_vec` but he has not made that switch. 
+
+#### iomap
+
+Meanwhile, he has heard that the iomap interface provides a feature that NFSD would like to have: the ability to read a local sparse file without triggering the mechanism that fills in the missing pages with zeroes. In the past, Dave Chinner had told him that reading an unallocated extent (i.e. "hole") in a sparse file will cause the system to allocate blocks on disk to hold the hole and fill it in with zeroes; that is not something that he wants an NFS read to do, especially for large files. 
+
+Viro came in over the remote link to ask how a read could cause that behavior; he noted that maybe it is XFS-specific, but that reads should not normally cause blocks to be allocated. Jan Kara said that it was a misunderstanding; the system will not allocate blocks on disk, but it will allocate zero pages in the page cache, which could be avoided using iomap. Lever said that NFSD wants the behavior provided by iomap; there is a "read-plus" operation that can distinguish between data and holes—it is effectively a "sparse read" operation. The client can ask for a range of data and the server can send the data, if it is present, or a compact reply simply telling the client that there is no data on the server in that range (or part of it). 
+
+But, Layton said, iomap is something that the underlying filesystem would have to support; NFSD cannot just call directly into iomap. Matthew Wilcox said that filesystems that support iomap will need to indicate that they do and provide operations for NFSD to call. Kara said that it sounded a bit like the existing [FIEMAP](<https://www.kernel.org/doc/Documentation/filesystems/fiemap.txt>) (and `SEEK_HOLE` for [`lseek()`](<https://man7.org/linux/man-pages/man2/lseek.2.html>)) APIs, which could perhaps be used to find holes in files. There are some races with FIEMAP, though, Lever said, which is why NFSD is not using it now. 
+
+Ted Ts'o said that there will be filesystems, such as ext4, that are supporting iomap gradually, so they will need a way to say that a given file does not support iomap. Perhaps the iomap operation would just return `EOPNOTSUPP` or the like and the caller would then have to fall back to using the existing mechanism. The ext4 developers plan to support iomap for the easy cases first, then add it for the more complicated cases. 
+
+Lever said that maybe NFSD would just wait until filesystems completely support iomap before trying to use the API, but Ts'o cautioned that there may be a long tail, where 99% of file types are handled just fine. It would be a shame if NFSD could not take advantage of iomap for the vast majority of files on ext4 filesystems, he said. Lever said that there is already a bifurcation in the NFSD read code, because sometimes it can use the pipe-splice mechanism, but sometimes it cannot and an iterator has to be used. 
+
+The read-plus operation is going to have to consult the underlying filesystem, so that it can report any holes to the client. Avoiding races in that reporting is desirable. Layton said that an "atomic sparse-read" operation is what is needed; Lever agreed and said that is what he would like to get from iomap. 
+
+Wilcox wondered how useful the page cache is for NFSD and whether it could use direct I/O instead. Layton said it was workload dependent and Lever said that there is no easy way for the server to determine whether the page cache is needed for a particular file or workload. He said that there are some other servers that try to make that kind of determination, but that the Linux NFSD always uses the page cache. 
+
+Kara asked about the atomicity needed for the sparse read; Layton said that when they had tried to use FIEMAP, the map could change out from under them due to racing with other processes. Viro said that the operation needed to be atomic with respect to hole punching and [`truncate()`](<https://man7.org/linux/man-pages/man2/truncate.2.html>) at a minimum. Over the Zoom link, Anna Schumaker said that when she encountered the races, she had not actually used FIEMAP but used `seek()` with `SEEK_HOLE`/`SEEK_DATA` instead. Though that is the "same thing" as FIEMAP, she and Kara agreed. 
+
+Another remote participant, Darrick Wong, asked what would be done with the information about the holes, given that iomap would not give any information about what is or is not in the page cache. Lever said that the server can use the information about where the holes are to read only from places where data is expected and to construct the read-plus reply from that. But Wong cautioned that there may be dirty pages in the page cache that correspond to pages in a hole; the `SEEK_HOLE` approach would actually notice that was the case, unlike iomap. 
+
+Kara said that using `SEEK_HOLE` was the better interface, but there are race conditions that will need to be handled. The `i_version` field of the inode could be used to detect that a change has been made. Lever suggested that maybe the read-plus operation would not promise a completely consistent view of the file, but Wilcox did not like that at all. 
+
+He said that the page cache could be changed so that it could directly represent file holes with a "special entry that says 'no data here'; that's a lot of work, but it is certainly something that I have been thinking very seriously about doing". Schumaker said that would also help in the NFS client code. Wong wondered if what was really desired was an operation to read from the next non-hole part of the file and to return the data and the offset where it was found. Layton said that Ceph has a sparse-read operation that returns a table of offsets and lengths, followed by all of the data; it would be nice to be able to do something like that with a VFS call. 
+
+Lever said that he does not see how the race can be avoided; something can always come along and write data into the hole while the read-plus operation is in-progress. The server cannot promise a consistent view and if the client needs that, it should lock the file. There are some problems with the NFS tests if that promise is not kept, Schumaker said. But Viro pointed out that there is no way to stop something local to the server writing to the hole while the read operation is being sent to the client; Lever agreed and said that the problem affects regular reads as well. "If folks are going to do something stupid, they deserve what they get ... it's glib, but I guess it's a fact of life." 
+
+#### Folios
+
+Lever circled back to the `struct xdr_buf` up on the screen and noted that he had invited Wilcox in the hopes of getting some ideas for converting NFSD to use folios; Lever wondered where that support would get plumbed in. On the receive side of the NFS server, there is an array of anonymous pages that get filled in by the network layer. On the send side, at least for sockets, the anonymous pages are completely handed off to the network code to be sent and then freed; new anonymous pages are created for the next request. So, he wondered, how do folios fit into that picture? 
+
+Wilcox said that he does not want to dictate how the NFSD code should be written, but could try to help the developers understand "how you work well with the MM [memory-management] layer and the filesystem layer". The idea behind folios is to manage memory in chunks that are larger than a page; so you can request an order-5 folio (i.e. 32 pages in length), but if you then break it up into single pages, it is wasted effort; the MM layer could have allocated those single pages directly much more efficiently. 
+
+He encourages developers to allocate folios in larger sizes, which helps reduce fragmentation, but only if they do not break the folios up. He suggested using larger folios even if a given use only needs part of it. If a particular request only needs 23 pages, say, he recommended not over-optimizing by splitting up the folio in order to use the other nine pages for something else; the next request may require the whole folio. 
+
+Lever said the main place where page-at-a-time behavior is happening is on the send side when handing off a page array to the network layer; maybe NFSD can simply hand over a folio containing those pages instead. Wilcox said that he wished David Howells was at the session because he is familiar with what the network layer is expecting. In general, though, the idea is that all parts of the system will eventually be able to work with a folio of any size. Passing the first page (or in some cases, any page) of the folio to existing code will often just work, though you "have to be a bit brave to do that". 
+
+Lever said that Howells wanted NFSD to switch from using the kernel [`sendpage()`](<https://elixir.bootlin.com/linux/v6.4.1/source/include/net/sock.h#L1280>) operation to [`sendmsg()`](<https://elixir.bootlin.com/linux/v6.4.1/source/include/net/sock.h#L1276>) with an iterator instead. Wilcox agreed that made sense and Lever asked if he or Howells were planning to implement an iterator that could take a folio parameter and "deal with it". "Absolutely", Wilcox said; the send-message takes a `bio_vec`, which can contain folios. Viro said that `iter_bvec()` already handles folios, so it should all work now. 
+
+But, Viro said that Howells wants to make iterators that can work with either `bio_vec` or `kvec`, which is "a complete nightmare" because it will add "a bunch of overhead for no good reason". The head and tail `kvec` entries could be converted to use `bio_vec` instead, Lever said. There are some pitfalls to using memory that comes from `kmalloc()`, but he said the NFSD developers just need to be careful and switch to using memory from the page allocator. In most cases, the server just uses a single page to hold both the head and the tail of the response. Howells showed up just as the session was ending; to some smiles and chuckling, Lever said that Howells had missed some discussion of how to deal with the head and tail `kvec` entries in `xdr_buf`, but that they had figured out what to do without his input.

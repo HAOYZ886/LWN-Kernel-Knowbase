@@ -1,0 +1,52 @@
+---
+title: BPF comes to firewalls
+url: https://lwn.net/Articles/747551/
+date: "February 19, 2018"
+category: "BPF-Networking; Modules-ELF modules; Networking-Packet filtering"
+author: "By Jonathan Corbet February 19, 2018"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+By **Jonathan Corbet**  
+February 19, 2018
+
+The Linux kernel currently supports two separate network packet-filtering mechanisms: iptables and nftables. For the last few years, it has been generally assumed that nftables would eventually replace the older iptables implementation; few people expected that the kernel developers would, instead, add a third packet filter. But that would appear to be what is happening with the newly announced [bpfilter](<https://lwn.net/Articles/747504/>) mechanism. Bpfilter may eventually replace both iptables and nftables, but there are a lot of questions that will need to be answered first. 
+
+It may be tempting to think that iptables has been the kernel's packet-filtering implementation forever, but it is a relative newcomer, having been introduced in the 2.4.0 kernel in 2001. Its predecessors (ipchains, introduced in 2.2.10, and ipfwadm, which dates back to 1.2.1 in 1995) are mostly forgotten at this point. Iptables has served the Linux community well and remains the firewalling mechanism that is most widely used, but it does have some shortcomings; it has lasted longer than the implementations that came before, but it is clearly not the best possible solution to the problem. 
+
+The newer [nftables](<https://lwn.net/Articles/564095/>) subsystem, merged for the 3.13 kernel release in early 2014, introduced an in-kernel virtual machine to implement firewall rules; users have been slowly migrating over, but the process has been slow. For some strange reason, system administrators have proved reluctant to throw away their existing firewall configurations, which were painful to develop and which still function as well as they ever did, and start over with a new and different system. 
+
+Still, it was logical to assume that nftables would eventually take over, especially as the iptables compatibility layers improved. Some people started to doubt this story, though, when serious development started on the BPF virtual machine. There seemed to be a lot of overlap between the two virtual machines, and BPF was being quickly extended in ways that improved its performance, functionality, and security. Even so, nftables development has continued, and there has been little talk — until now — of pushing BPF into the core of the firewalling code. 
+
+#### Bringing in BPF
+
+The announcement of bpfilter changes that situation, though. In short, bpfilter enables the creation of BPF programs that can be attached to points in the network packet path and make filtering decisions. In the proof-of-concept patches, those programs are attached at the [express data path](<https://lwn.net/Articles/682538/>) (XDP) layer, where they are run from the network-interface drivers. But, as Daniel Borkmann noted in the introduction to the patches, BPF programs could be just as easily attached at any other point in the path, allowing them to make decisions at the same points that iptables rules do. 
+
+There are a number of advantages claimed for the bpfilter approach. BPF programs can be just-in-time compiled on most popular architectures, so they should be quite fast. The work that has been done to enable the offloading of XDP-level programs to the network interface itself can come into play here, moving firewall processing off the host CPU entirely. The use of BPF enables the writing of firewall rules in C, which may appeal to some developers who are starting from the beginning. And firewall code would be subject to the BPF verifier, adding a layer of security to the whole system. 
+
+One of the core design features for bpfilter is the ability to translate existing iptables rules into BPF programs. This feature is intended to make it easy for existing firewall configurations to be moved over to the new scheme, perhaps without system administrators even knowing that it is happening. This translation is done in an interesting manner. Iptables rules are passed to the kernel, so the kernel must take responsibility for doing that work, but the task can be a complex one that would benefit from a user-space implementation. 
+
+To enable such an implementation, the bpfilter developers have created a new mechanism that supports the creation of a special type of kernel module to handle this kind of task. These modules would be part of the kernel and would be shipped by distributors as just another `.ko` file, but they would contain an ordinary ELF executable. After the module has been loaded, its code can be run in a separate user-space process; all that is required is a call to a special version of [`call_usermodehelper()`](<https://elixir.bootlin.com/linux/v4.15.4/source/kernel/umh.c#L465>). 
+
+This mechanism allows the translation code to be managed as if it were just another part of the kernel. That code can be developed in user space, though. When it runs, the translation code will be separated from the kernel, making it harder to attack the kernel via that path. If this mechanism catches on, one can imagine that a number of other tasks could eventually be pushed out of the kernel proper into one of these special user-space modules. Developers should be careful, though; this could prove to be a slippery slope leading toward something that starts to look like a microkernel architecture. 
+
+#### Early responses
+
+There have not been a whole lot of comments thus far on the code itself. That may be partly because, in their haste to get a proof of concept out to illustrate the idea, the developers never quite got around to writing comments in the code — or even changelogs for the patches. The idea itself, though, has raised concerns for some developers. 
+
+Harald Welte, who is not often seen in this community these days, [showed up](<https://lwn.net/Articles/747557/>) with a number of questions. At the top of his list was the decision to emulate iptables rules with the new BPF mechanism. If the new subsystem is to ever replace the iptables implementation, it will need to implement _exactly_ the same behavior; small and subtle differences could introduce security problems into deployed firewall configurations. Given the complexity of iptables, the chances of such differences happening are significant. 
+
+More fundamentally, the networking developers have wanted to phase out iptables and its user-space interfaces for some time. Iptables has not aged entirely well. For example, there is no way to add or replace a single rule (or small set of rules); iptables can only wipe out the entire configuration and start from scratch. That makes firewall changes expensive; it also gets difficult to coordinate changes when they are being made by multiple actors at once. The increasing use of containers has created just this kind of situation; addressing this problem requires moving away from the iptables API. The fact that iptables requires separate rule sets for IPv4 and IPv6 creates a pain point for administrators as well. 
+
+Implementing the iptables API with bpfilter, Welte said, will ""risk perpetuating the design mistakes we made in iptables some 18 years ago for another decade or more"". It will push back the (already distant) date when that API could be deprecated and removed. Rather than focusing on iptables, Welte said, the developers should create an emulation of the newer nftables API, which was designed with the lessons from iptables in mind. That would support sites that have already migrated and encourage that migration to continue. 
+
+Networking maintainer David Miller (who authored some of the new code) [replied](<https://lwn.net/Articles/747558/>) that iptables is still far more widely used, so implementing that interface provides for better testing coverage in the near term. Welte [answered](<https://lwn.net/Articles/747559/>), though, that most of the biggest use cases (Docker and Kubernetes, for example) use the command-line tools rather than the iptables API, so there is no need to implement emulation of the API itself to test with those systems. Miller, however, [disagreed](<https://www.spinics.net/lists/netdev/msg484259.html>) with the idea that the iptables binaries could be easily replaced on deployed systems: ""Like it or not iptables ABI based filtering is going to be in the data path for many years if not a decade or more to come"". 
+
+Interestingly, while there was talk of implementing the nftables API, nobody has yet questioned the idea of applying the BPF virtual machine to firewalls, even though it would be likely to supplant nftables relatively quickly. Instead, Miller [said](<https://www.spinics.net/lists/netdev/msg484318.html>) in the discussion that nftables failed to address the performance problems in Linux's packet-filtering implementation, driving users toward user-space networking technologies instead. There is a real possibility that nftables could end up being one of those experiments that is able to shed some light on the problem space but never takes over in the real world. 
+
+Overall, bpfilter is an extremely young project and there are a lot of questions yet to be answered about it. While much of the packet-filtering logic can likely be expressed in BPF code, there are more advanced features (like connection tracking, [pointed out](<https://lwn.net/Articles/747561/>) by Florian Westphal) that are still likely to need a fair amount of kernel support. There are no performance numbers with the patch set, so any performance gains are still theoretical at this point. And the code itself is quite young, lacking both features and documentation. 
+
+The end result is that we'll probably not see bpfilter in the mainline kernel in the immediate future. Given the developers who have worked on it, though, bpfilter is clearly a serious initiative that is firmly aimed at getting into the mainline eventually. If it truly proves to be a better solution to the network packet-filtering problem, those developers seem likely to prevail eventually.

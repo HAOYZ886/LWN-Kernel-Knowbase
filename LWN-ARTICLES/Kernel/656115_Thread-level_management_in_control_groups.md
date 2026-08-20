@@ -1,0 +1,34 @@
+---
+title: "Thread-level management in control groups"
+url: https://lwn.net/Articles/656115/
+date: "September 1, 2015"
+category: "Control groups-Thread-level control"
+author: "By Jonathan Corbet September 1, 2015"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+September 1, 2015
+
+Progress on the multi-year task of reworking the kernel's control group ("cgroup") mechanism might appear to have slowed down recently, but that work continues and, occasionally, surfaces on the mailing lists. Recently, cgroup maintainer Tejun Heo [posted](<https://lwn.net/Articles/653457/>) a proposal for the CPU-scheduler controller interface in the new cgroup subsystem; it changes a number of control knobs, makes time units consistent across the interface, and so on. This proposal generated quite a bit of discussion, but it wasn't the contents of the new interface that were controversial. Instead, it became clear that some users are not at all happy about a feature that is absent from this interface — and which may have to be restored before this work can go forward. 
+
+The new "unified hierarchy" cgroup interface was [a topic of discussion](<https://lwn.net/Articles/571977/>) at the 2013 Kernel Summit. At that gathering, Tejun stated his intent to make cgroups handle membership at the process level, but not below. If a process is made up of multiple threads, all of those threads will be placed into the same group as a unit. That is a change from the current cgroup implementation, which allows different threads to be placed in different groups. Eliminating that capability, Tejun said, makes the implementation much more straightforward and, in any case, most controllers only make sense at the process level anyway. 
+
+At the time, there were some expressions of concern from the gathered developers, not all of whom were convinced that losing the ability to split a process's threads across control groups would be acceptable. No definitive conclusion on the issue was reached at the time; further discussion was deferred until the code itself made an appearance. Two years later, that code is out but the worries have not gone away; scheduler developer Peter Zijlstra was quick to [raise the issue](<https://lwn.net/Articles/656116/>) again. 
+
+A few users of thread-level cgroup control surfaced in the ensuing discussion; the most vocal of them was Paul Turner of Google, who [asserted](<https://lwn.net/Articles/656117/>) that this ability is an important part of how systems are managed there. One use case mentioned was the division of a job into work and support threads. The threads doing the "real work" should get the bulk of the available CPU time, but an application will typically want to guarantee a minimum of time to the support threads as well. Putting the two types of threads into different control groups allows this policy to be implemented in a fairly straightforward way. 
+
+Tejun's response took a few different forms. One was to question the importance of this use case; he [described](<https://lwn.net/Articles/656118/>) it as ""super duper fringe"" at one point. He also suggested that the problem could be solved using process priorities, but Paul [clearly stated](<https://lwn.net/Articles/656120/>) that priorities are not a suitable solution to the problem, while cgroups are. It seems clear that a number of users beyond Google employ control groups in this manner now and they would not be happy if this ability were to be left out of the new cgroup interface. If nothing else, leaving it out would tend to inhibit movement away from the old interface which, in turn, would make that API's eventual removal an even more distant prospect. 
+
+The other significant [point](<https://lwn.net/Articles/656119/>) argued by Tejun is that the cgroup interface is not a good way for applications to manage their environment. It may work as a system-administration interface, he said, but application developers should be given a more programmatic, system-call-based interface. Such an interface would be more easily used by those developers, he said, and separating the administrative and application interfaces would help to prevent conflicts between the administrator and the application over thread-level management. 
+
+In [this message](<https://lwn.net/Articles/656121/>) Tejun briefly sketched out the "resource group" API that he has in mind. These groups could be created and managed within an application with a new `set_resource()` system call. 
+
+Finally, Tejun argued that, rather than using cgroups for grouping of threads, the kernel should just employ the normal process hierarchy for that purpose; the `set_resource()` system call follows that guideline. Additionally, new threads could be created with a special `clone()` flag that would cause them to be placed into a new resource group. The process hierarchy is already understood by application developers, he said, and can be manipulated with existing system calls. If developers use that hierarchy to partition their applications, they will have better results and the complexity of supporting thread-level cgroup membership can be avoided. 
+
+The API itself was not discussed much; the discussion was more about identifying the problem than nailing down the details of its solution. There appears to be some concern about moving away from the cgroup API for thread-level management, but developers could probably be convinced on that score if the new API looked good enough; the current API has few overt admirers, after all. There was some resistance to the idea of limiting grouping to the process hierarchy, though. It seems that a number of use cases involve moving threads from one control group to another, depending on just what a specific thread is doing at any given time. A grouping mechanism that was strictly based on the process hierarchy would not be able to move processes in that way. 
+
+The end of the discussion came when [Ingo Molnar](<https://lwn.net/Articles/656122/>) and [Peter](<https://lwn.net/Articles/656123/>) both indicated that they would block further work on the CPU cgroup controller until the problem of per-thread control had been resolved. The issue, they said, is fundamental to the design of the subsystem, and it is not reasonable to expect that a solution can be retrofitted in after this code is merged. Tejun has not, as of this writing, indicated how he intends to proceed, whether it be by allowing per-thread control-group membership or through a separate control API. Either way, further progress in this area cannot be expected until a solution to this particular problem is presented and accepted by the relevant maintainers.

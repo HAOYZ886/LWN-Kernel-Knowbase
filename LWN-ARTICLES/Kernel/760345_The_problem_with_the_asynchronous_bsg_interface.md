@@ -1,0 +1,32 @@
+---
+title: The problem with the asynchronous bsg interface
+url: https://lwn.net/Articles/760345/
+date: "July 19, 2018"
+category: "SCSI-Block SCSI generic bsg"
+author: "By Jonathan Corbet July 19, 2018"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+July 19, 2018
+
+The kernel supports two different "SCSI generic" pseudo-devices, each of which allows user space to send arbitrary commands to a SCSI-attached device. Both SCSI-generic implementations have proved to have security issues in the past as a result of the way their API was designed. In the case of one of those drivers, these problems seem almost certain to lead to the removal of a significant chunk of functionality in the 4.19 development cycle. 
+
+The SCSI standard is generally thought of as a way to control storage devices, such as disk and tape drives (younger readers, ask a coworker what the latter were). But SCSI can be thought of as a sort of network protocol with more general capabilities, as demonstrated by its use to control tape-changing robots, scanners, optical-disk writers, and more. Drivers for such devices tend to run in user space; to support those drivers, the SCSI generic (SG) interface was created. This interface provides direct access to the SCSI protocol, allowing user-space code to control devices in ways not supported by the in-kernel disk and tape drivers. 
+
+The original SG interface was simply called "[`sg`](<http://sg.danny.cz/sg/>)"; like the "`sd`" driver for SCSI disks and "`st`" driver for tape drives, its name highlights the SCSI developers' focus on efficiency, in that no letters were wasted. The sg driver implements a low-level device that interfaces directly with the SCSI midlayer. Back in 2004, Jens Axboe [posted a new implementation](<https://lwn.net/Articles/96547/>) that he called "`bsg`"; unlike `sg`, it worked at the level of the block layer, taking advantage of its request-queue infrastructure to manage SCSI operations. It took a while, but `bsg` was finally merged for the 2.6.23 release in 2007\. Since then, both interfaces have coexisted in the kernel. The `sg` interface retains a number of users; older code makes up some of them, but some users have found that it works better for their needs (as will be revisited below). The `bsg` interface, instead, is the only way to gain access to some newer SCSI protocol features. 
+
+Both devices implement two different APIs to accomplish the same task. The synchronous interface uses `ioctl()` commands; results of operations are returned when `ioctl()` returns. There is also an asynchronous interface based on simple `read()` and `write()` calls, where one uses `write()` to issue a command, followed by a later `read()` to obtain the results. The system calls involved are simple, but the data that is transferred is not: SCSI commands are executed by writing an [`sg_io_hdr` structure](<https://elixir.bootlin.com/linux/v4.17.8/source/include/scsi/sg.h#L43>) to the device. The structure is complex in its own right, but it can also contain pointers to other ranges of user-space memory. Normally, a `write()` call will not access memory outside of the provided buffer; with these interfaces, instead, a `write()` call can cause accesses to memory almost anywhere in the address space. 
+
+The dangers of this kind of interface have become increasingly clear in recent years. In this case, there have been a few security issues related to indirect memory access through the SG devices. There is also the persistent concern that an attacker may succeed in convincing a setuid program to write the wrong thing to such a device, opening up another vulnerability. Worries about this kind of problem led to the recent rejection of the write-based [filesystem mounting API](<https://lwn.net/Articles/759499/>). For SG, though, the interfaces have been established for a long time, so they cannot be withdrawn without breaking applications. 
+
+For `bsg`, though, that may not actually be the case. 
+
+In June, Jann Horn [tried to harden these interfaces](<https://lwn.net/ml/linux-kernel/20180615152335.208202-1-jannh@google.com/>) by adding more restrictions on the contexts in which they can be used. Almost as an aside, the changelog noted that, in the case of `bsg`, arbitrary access to memory can also happen in a `release()` call, when the file descriptor is being closed. That immediately set off a new round of alarms; even a legitimate user-space memory access can run into trouble at release time, when that memory may no longer be present. The results would be unpredictable — but they would be predictably bad. 
+
+There was some discussion about how this problem might be fixed, but it didn't take long for Christoph Hellwig to [suggest](<https://lwn.net/ml/linux-kernel/20180621123431.GA558@infradead.org/>) that the asynchronous side of the `bsg` interface be removed outright. There are reasons to believe that it is not actually being used in the real world, some of which were [described](<https://lwn.net/ml/linux-kernel/90063ef3-68fa-e983-9b47-838e6076b0f4@interlog.com/>) by Douglas Gilbert, the maintainer of the `sg` interface. Among other things, if two processes are issuing commands to the same device, `bsg` is unable to keep the responses straight. ""Once real world users (needing an async SCSI (or general storage) pass-through) find out about that bsg 'feature', they don't use it"". Horn [did some searching](<https://lwn.net/ml/linux-kernel/CAG48ez3BWeZkW5XG814K4o7p0KWXVm9Gpzh2rTthNei=4fhH-A@mail.gmail.com/>) in the [Debian Code Search database](<https://codesearch.debian.net/>) and concluded that there were no users that needed to be worried about. 
+
+The end result of the discussion is that Axboe has [merged](<https://lwn.net/Articles/760350/>) Hellwig's patch to remove the asynchronous `bsg` functionality. The synchronous `ioctl()`-based API, which does not have the same problems (and which is actually used by applications), will remain. Linus Torvalds has [stated](<https://lwn.net/Articles/760351/>) that this patch should also be applied to the stable kernels as well. So, unless some users of the asynchronous API come forward in the near future, this particular feature will soon disappear.

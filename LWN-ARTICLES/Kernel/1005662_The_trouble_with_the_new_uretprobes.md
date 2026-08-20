@@ -1,0 +1,46 @@
+---
+title: The trouble with the new uretprobes
+url: https://lwn.net/Articles/1005662/
+date: "January 23, 2025"
+category: "Security-seccomp; System calls"
+author: "By Jonathan Corbet January 23, 2025"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jonathan Corbet**  
+January 23, 2025
+
+A "uretprobe" is a dynamic, user-space tracepoint injected by the kernel into a running process; [this document](<https://docs.kernel.org/trace/uprobetracer.html>) tersely describes their use. Among other things, uretprobes are used by the `perf` utility to time function calls. The 6.11 kernel saw a significant change to uretprobes that improved their performance, but that change is also creating trouble for some users. The best way to solve the problem is not entirely clear. 
+
+Specifically, a uretprobe exists to gain information at the return from a function in the process of interest. Older kernels implemented uretprobes by injecting code that, on entry to a function, changed the return address to a special trampoline that, in turn, contained a breakpoint trap instruction. When the target process executed that instruction, it would trap back into the kernel, which would then extract the information of interest (such as the function's return value) and run any other attached code (a BPF program, perhaps) before allowing the process to resume. This method worked, but it also had a noticeable performance impact on the probed process. 
+
+In an attempt to improve uretprobe performance, Jiri Olsa put together [a patch set](<https://lwn.net/ml/linux-kernel/20240611112158.40795-1-jolsa@kernel.org/>) that changed the implementation on x86 systems. The return trampoline still exists but, rather than triggering a trap, it just calls the new `uretprobe()` system call, which then takes care of all of the associated work. Since system-call handling is faster than taking a trap, the cost to the probed process is lower when `uretprobe()` is used. This new system call takes no arguments, and it can only be called from the kernel-injected special trampoline; otherwise it will just deliver a `SIGILL` signal to the calling process. 
+
+Arguably, all system calls are special, but this one takes "special" to a whole new level. It is not something that a process can just call to obtain a useful service from the kernel. `uretprobe()` is thus unlikely to be on anybody's list of "five new system calls that every programmer should know". It does, however, succeed in accelerating uretprobes by as much as about 30%. This change went into the 6.11 release, seemingly without ill effect. 
+
+On January 10, though, Eyal Birger [reported](<https://lwn.net/ml/all/CAHsH6Gs3Eh8DFU0wq58c_LF8A4_+o6z456J7BidmcVY2AqOnHQ@mail.gmail.com>) an ill effect; kernels that implement `uretprobe()` were causing Docker containers to crash. The problem is that Docker uses [`seccomp()`](<https://man7.org/linux/man-pages/man2/seccomp.2.html>) to impose a policy on which system calls a containerized system can invoke. The policy used by Docker is, as standard practice would suggest, a default-deny arrangement; if a given system call has not been explicitly enabled, it will be blocked. `uretprobe()`, not being on any Docker developer's list of new exciting system calls, is not found in the allowlist. As a result, the injection of a uretprobe into a process running under Docker will result in that process's untimely and mysterious death. Docker users will, indeed, no longer notice a performance hit on a traced process, but they are unlikely to express their gratitude for that. 
+
+Various possibilities for fixing the problem were suggested at the time. Olsa put together [a quick patch](<https://lwn.net/ml/all/Z4YszJfOvFEAaKjF@krava>) to detect a failure to execute `uretprobe()` and fall back to the old implementation in that case. He also [considered](<https://lwn.net/ml/all/Z4eBs0-kJ3iVZjXL@krava>) simply disabling the `uretprobe()` implementation entirely when `seccomp()` is in use, or adding a sysctl knob to control whether `uretprobe()` is used. Birger, though, [disliked the sysctl idea](<https://lwn.net/ml/all/CAHsH6Gs03iJt-ziWt5Bye_DuqCbk3TpMmgPbkYh64XBvpGaDtw@mail.gmail.com/>), saying: ""'Give me speed but potentially crash processes I don't control' is a curious semantic"". 
+
+Oleg Nesterov, instead, [suggested](<https://lwn.net/ml/all/20250115150607.GA11980@redhat.com>) patching `seccomp()` to simply ignore calls to `uretprobe()`, making that system call even more special. Birger returned with [a patch](<https://lwn.net/ml/all/20250117005539.325887-1-eyal.birger@gmail.com>) implementing Nesterov's suggestion. Kees Cook, however, [questioned this change](<https://lwn.net/ml/all/202501181212.4C515DA02@keescook>), wondering why `uretprobe()` needs to be so special. Docker, he pointed out, already handles other weird system calls like [`sigreturn()`](<https://man7.org/linux/man-pages/man2/sigreturn.2.html>); it should be able to do the same with `uretprobe()`: 
+
+> Basically, this is a Docker issue, not a kernel issue. Seccomp is behaving correctly. I don't want to start making syscalls invisible without an extremely good reason. 
+
+Birger [responded](<https://lwn.net/ml/all/CAHsH6GuifA9nUzNR-eW5ZaXyhzebJOCjBSpfZCksoiyCuG=yYw@mail.gmail.com>) that this case is indeed different: 
+
+> I think the difference is that this syscall is not part of the process's code - it is inserted there by another process tracing it. So this is different than desiring to deploy a new version of a binary that uses a new libc or a new syscall. 
+
+That reasoning just [hardened](<https://lwn.net/ml/all/8B2624AC-E739-4BBE-8725-010C2344F61C@kernel.org>) Cook's position, though. A process might want to defend against injection of `uretprobe()` by blocking it with `seccomp()`, he said. The whole point of `seccomp()` is to implement a policy given to it, he added; there should not be a separate policy within `seccomp()` itself. 
+
+This reasoning, sound as it may be, does little to solve Birger's problem, which, [he said](<https://lwn.net/ml/all/CAHsH6GtpXMswVKytv7_JMGca=3wxKRUK4rZmBBxJPRh1WYdObg@mail.gmail.com/>), is simply: 
+
+> The problem we're facing is that existing workloads are breaking, and as mentioned I'm not sure how practical it is to demand replacing a working docker environment because of a new syscall that was added for performance reasons. 
+
+This replacement, he said, would not be easy to accomplish. He concluded by wondering if the right solution might be to just revert the `uretprobe()` change. Olsa [said](<https://lwn.net/ml/all/Z4zXlaEMPbiYYlQ8@krava>), again, that it might be better to introduce a new sysctl knob to control whether `uretprobe()` is used, but Cook [answered](<https://lwn.net/ml/all/202501201334.604217B7@keescook>) that reverting may be the best choice, at least for now, while some thought goes into how this implementation should interact with features like `seccomp()`. Olsa then [suggested](<https://lwn.net/ml/all/Z4-xeFH0Mgo3llga@krava>) that the best solution might be to disable `uretprobe()` temporarily, without removing it from the kernel, until Docker can be updated to handle it correctly. Birger [went off](<https://lwn.net/ml/all/CAHsH6GsXacPXiEz7amTcgBfWdiOJx2G3cAMdSdnkqOnJ+opqQg@mail.gmail.com>) to consider that idea. 
+
+This approach may lead to a solution for this specific problem, though it could take years before enough Docker installations have been updated to make re-enabling `uretprobe()` safe. But we will be seeing this problem again. Running systems within a sandbox that denies all system calls that have not been explicitly enabled may well be good for security, but that practice will run into trouble when the kernel underlying the whole system routinely adds new system calls. Beyond `uretprobe()`, the x86 architecture saw the addition of nine new system calls in 2024: `setxattrat()`, `getxattrat()`, `listxattrat()`, `removexattrat()`, `mseal()`, `map_shadow_stack()`, `lsm_get_self_attr()`, `lsm_set_self_attr()`, and `lsm_list_modules()`. There is no reason to believe that the addition of system calls will stop now. 
+
+Something will have to give; in this case, that something would appear to be the new uretprobe implementation. But it is hard to imagine that the development community will be pleased at the idea that it cannot add new system calls lest existing Docker implementations break. Perhaps there will never be another system call as special as `uretprobe()`, with its ability to break systems with just a kernel change but, as Cook [pointed out](<https://lwn.net/ml/all/8B2624AC-E739-4BBE-8725-010C2344F61C@kernel.org>), there have been cases where the addition of a more "normal" system call has caused similar crashes. In summary, it would be surprising if the combination of "don't allow anything new" and "add lots of new things" didn't explode every now and then.

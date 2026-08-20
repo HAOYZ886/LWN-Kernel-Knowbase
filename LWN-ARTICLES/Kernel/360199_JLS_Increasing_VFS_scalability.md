@@ -1,0 +1,38 @@
+---
+title: "JLS: Increasing VFS scalability"
+url: https://lwn.net/Articles/360199/
+date: "November 3, 2009"
+category: "Filesystems-Virtual filesystem layer; Scalability"
+author: "By Jonathan Corbet November 3, 2009"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+November 3, 2009
+
+It can be tempting to dismiss scalability work as being of interest mainly to companies running massive server systems; most "ordinary" Linux users are not running into the kind of problems that scalability-oriented developers are trying to fix. But, of course, the truth of the matter is that those users haven't encountered those problems _yet_. The past work of scalability-oriented developers is what makes our current desktop and laptop systems work as well as they do; their current work will enable next year's consumer-level systems. So Nick Piggin's Japan Linux Symposium talk on virtual filesystem scalability will be of interest to anybody who anticipates using Linux in the future. 
+
+That said, one of the key constraints on scalability work is that it must not worsen performance on current systems. So Nick is taking care that his VFS work will improve scalability with no impact on single-threaded performance. Beyond that, he is aiming to improve scalability within a single filesystem - forcing system administrators to split their filesystems to get better performance would be cheating. To get there, he has identified five specific bottlenecks which must be addressed. 
+
+The first of those is **`files_lock`** ; it is, he says, the easiest to fix. This global lock protects a per-superblock list of open files; it is needed by the file open and close paths. As the number of threads grows, this lock limits the scalability of filesystem-oriented workloads. The lock itself is only part of the problem; the real issue is that a single `list_head` is never going to be scalable in multiprocessor situations. In this case, it turns out that the kernel almost never needs to read the full list of open files; that only happens at unmount time. So turning the single list into a per-CPU list is a viable option; it eliminates the locking altogether and makes the management of the list scalable. The only tricky part is when files are removed; that requires cross-CPU access to the list. 
+
+Next on the list is **`vfsmount_lock`** , which is used when finding mounts from directory entry ("dentry") structures. This lock is taken when crossing mount points in the path lookup process; it is also used at mount and unmount time. Pathname lookup is clearly a performance-critical path in the kernel, so getting rid of a global lock can only be a good thing. Nick considered using read-copy-update (RCU) for pathname lookup, but he found it to still be too slow. Part of the problem is the need to block all readers at unmount time, something that RCU cannot do on its own. 
+
+The solution is to go to per-CPU locks. Nick has introduced a variant on per-CPU locks called [brlocks](<https://lwn.net/Articles/360206/>), or "big reader locks." These locks share the name and goal of the [2.4.x brlocks](<https://lwn.net/Articles/360211/>) which were removed in the 2.5 development cycle, but the implementation is different. Essentially, a brlock is per-CPU for read access, but write access excludes all other users on all CPUs. Since pathname lookup is a read-only operation, brlocks will be fast where the kernel needs them to be; unmounts will be slow, but those are relatively rare operations. 
+
+**`mnt_count`** is a per-filesystem reference count, incremented for each open and decremented for each close. Like the global list described above, this global counter limits the scalability of opens and closes. Once again, going per-CPU is the obvious solution here, with the minor problem that a [![\[Nick Piggin\]](https://static.lwn.net/images/conf/ks-jls-09/nick-piggin-sm.jpg)](<https://lwn.net/Articles/360242/>) `put()` operation must check whether the (global) count is zero. But, as it happens, that case only comes about when the filesystem is not actually mounted, so this check need not be performed most of the time. 
+
+The hardest one to fix is **`dcache_lock`**. Most VFS operations need it, with the sole exception of name lookup, which has used RCU for a while now. Some operations - LRU scanning and reclaim in the dentry cache in particular - can hold the lock for a long time. And the lock covers a whole bunch of different - and sometimes unknown - things. The exporting of `dcache_lock` to filesystems has not helped here; individual filesystems are using it for their own, not always clear, ends. So a developer trying to bring dcache_lock under control must start by trying to figure out what it is being used to protect. 
+
+Nick has done his best to split apart the various locking cases; these include the dentry cache hash, the dentry LRU list, the inode dentry alias list, various statistics, etc. Some of this stuff is moved under the protection of the per-dentry spinlock (`d_lock`); other things, like the dentry hash and LRU, get new locks. There are a lot of problems still, starting with lock-ordering challenges. Nick is working around some of these using non-blocking "trylock" operations, but that kind of code tends to be hard to merge. The various locking cases are still not truly independent from each other; among other things, that imposes more ordering requirements. And walking up the directory tree (trying to determine a path name from a dentry, usually) becomes much harder in the absence of a global lock. 
+
+In summary, cleaning up `dcache_lock` looks like a long and messy project. This is just the lock which is showing up as the worst bottleneck in some situations, though, so the work needs to be done. 
+
+Finally, there is the matter of **`inode_lock`** , which is needed by most inode operations (lookup, creation, destruction, writeback, sync, etc). As with `dcache_lock`, Nick has split the locking into a number of independent classes - the inode itself, the inode hash, the LRU list, and so on. Some of these classes are moved under the per-inode lock, while specific locks have been added for some cases. The per-superblock inode list has been made into a per-CPU variable, as have the counters used to generate statistics. Nick has also made the allocation of inode numbers into a per-CPU operation by assigning a range of numbers to each processor. This means that inode numbers are no longer allocated sequentially; it's not clear whether that will be a problem or not. 
+
+So what comes of all this work? Nick claims "great" open/close scalability, and "good" create/unlink scalability. He showed the results of running a microbenchmark which just did `close(open(path))` repeatedly; with current mainline, he was able to get 450 operations/second on each of 64 CPUs. With the scalability patches added, that rate went up to over 300,000 operations/second - a significant improvement. Running `unlink(creat(path))` shows better scalability even with two CPUs - but it does, for some reason, impose a cost on single-threaded workloads on the ia-64 architecture. 
+
+The VFS scalability work is clearly worth doing; we'll all be glad that these problems have been ironed out someday. But there's still some messy things to clean up, so this patch set (or the gnarlier parts of it, anyway) may take a while on their way into the mainline.

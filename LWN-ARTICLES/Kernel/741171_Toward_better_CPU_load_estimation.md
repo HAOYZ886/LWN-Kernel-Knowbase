@@ -1,0 +1,40 @@
+---
+title: Toward better CPU load estimation
+url: https://lwn.net/Articles/741171/
+date: "December 11, 2017"
+category: "Scheduler-Load tracking"
+author: "By Jonathan Corbet December 11, 2017"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jonathan Corbet**  
+December 11, 2017
+
+"Load tracking" refers to the kernel's attempts to track how much load each running process will put on the system's CPUs. Good load tracking can yield reasonable predictions about the near-future demands on the system; those, in turn, can be used to optimize the placement of processes and the selection of CPU-frequency parameters. Obviously, poor load tracking will lead to less-than-optimal results. While achieving perfection in load tracking seems unlikely for now, it appears that it is possible to do better than current kernels do. The [utilization estimation patch set](<https://lwn.net/Articles/740816/>) from Patrick Bellasi is the latest in a series of efforts to make the scheduler's load tracking work well with a wider variety of workloads. 
+
+Until relatively recently, the kernel had no notion of how much load any process was putting on the system at all. It tracked a process's total CPU utilization, but that is different from — and less useful than — tracking how much of the available CPU time that process has been using recently. In 2013, the [per-entity load-tracking (PELT) mechanism](<https://lwn.net/Articles/531853/>) was merged; it maintains a running average of each process's CPU demands. That average decays quickly over time, so that a process's recent behavior is weighted much more heavily than its distant past. The PELT values are maintained (and continue to decay) while processes are blocked, giving a better overall view of their utilization. 
+
+The addition of PELT improved the scheduler considerably. It became possible to estimate just how much CPU a given mix of processes is likely to need and to distribute those processes across the system in a way that loads all CPUs equally. The addition of the "schedutil" CPU-frequency governor enabled the kernel to set the operating frequencies of the CPUs at the level needed to service the current load, but no higher. In short, PELT is regarded as a clear step forward for the kernel's CPU scheduler. 
+
+That does not mean that PELT is perfect, though; indeed, developers have been running into its limitations almost since it was merged. The mobile and embedded community seems to complain the loudest. The biggest concern is almost always responsiveness: PELT can take too long to respond to changes in the system workload. A user who starts a browser on a mobile device wants it to respond quickly, but PELT will take a few 32ms measurement cycles to fully understand the load that the browser is placing on the system. During that time, the browser may be scheduled inappropriately (alongside other CPU-intensive tasks, for example) and the CPU it is running on may not be operating at as high a frequency as it should be. In fact, running such a task on a CPU that is running at a slower frequency will cause PELT to take even longer to generate a realistic estimate. 
+
+In [the first posting of the utilization estimation patch set](<https://lwn.net/Articles/732021/>) (in August 2017), Bellasi expressed the problem another way: 
+
+In the mobile world, where some of the most important tasks are synchronized with the frame buffer refresh rate, it's quite common to run tasks on a 16ms period. This 16ms window is the time in which everything happens for the generation of a new frame, thus it's of paramount importance to know exactly how much CPU bandwidth is required by every task running in such a time frame. 
+
+PELT operates on a rather longer time scale than 16ms, so several frames will have gone by before it gets a handle on the load presented by such a process. One can, of course, change PELT's accumulation periods, but that still leaves an unwanted ramp-up period and doesn't address some of the related issues. For example, the load estimates from PELT tend to vary over time as a result of the decay algorithm, even when the processes involved are running regularly. If a process sleeps for a period of time without work to do, its load estimate will quickly decay toward zero, meaning that the scheduler no longer has useful information about its needs once it starts to run again. 
+
+Various attempts have been made over time to improve the performance of PELT in this setting. The [window-assisted load tracking (WALT)](<https://lwn.net/Articles/706374/#walt>) algorithm works mostly by eliminating the decay and only looking at recent behavior. WALT has shipped in some devices, but has not found its way into the mainline, perhaps out of fear of worsening load tracking for other use cases. Qualcomm went further by [replacing much of the scheduler entirely](<https://www.anandtech.com/show/8933/snapdragon-810-performance-preview/4>) with its out-of-tree variant tuned for its systems. This code has not even been posted to the kernel mailing lists, much less seriously considered for mainline inclusion. 
+
+The current utilization estimation work has taken a simpler approach that has a better chance of working across all use cases. It is based on the observation that, while PELT may struggle to properly characterize processes that have not been running for long, its measurement of what a process needed to get to the point where it stops running and goes back to sleep is good. But PELT quickly decays that information away and has to start over the next time the process begins running. If the kernel were to track those end-of-run measurements, it would have a better idea of what the process will need the next time it starts running. 
+
+So the utilization estimation patches do not change the PELT algorithm at all. Instead, whenever a process becomes non-runnable, the current utilization value is added into a new running average that represents the kernel's best guess for what the process will need the next time it runs. That average is designed to change relatively slowly, and it is not decayed while a process it not runnable, so the full value will still be there even after a long sleep. 
+
+Whenever the system needs to look at the load created by a given running process, either to calculate overall CPU loads or to set CPU frequencies, it will take the greater of the saved estimate or the current load as calculated by PELT. The estimate, in other words, is used as a lower bound when calculating a process's load; if PELT comes up with a higher value, that value will be used. When a given process becomes runnable, its load will be immediately set to this saved estimate, giving the scheduler the information it needs to properly place the task and set CPU operating parameters. 
+
+The cost of the new estimation code is approximately a 1% performance hit when running the [`perf bench sched messaging`](<https://perf.wiki.kernel.org/index.php/Tutorial#sched:_Scheduler_benchmarks>) benchmark (also known as "hackbench"), which stresses context-switch performance. That may be a hit that users with long-running, throughput-oriented workloads don't want to take, so the patch set leaves utilization estimation off by default. Enabling it requires setting the `SCHED_UTILEST` scheduler feature bit. 
+
+The patch set has received little in the way of review comments as of this writing. Getting scheduler changes into the mainline is always difficult because the chances of regressing somebody's workload tend to be high. In this case, though, the existing load-tracking code is left carefully untouched, so the probability of regressions should be quite low. Perhaps that will be enough to make some progress on this longstanding scheduler issue in the mainline.

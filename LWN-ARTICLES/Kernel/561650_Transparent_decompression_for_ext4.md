@@ -1,0 +1,28 @@
+---
+title: Transparent decompression for ext4
+url: https://lwn.net/Articles/561650/
+date: "July 31, 2013"
+category: "Filesystems-ext4"
+author: "By Jonathan Corbet July 31, 2013"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+July 31, 2013
+
+Transparent compression is often found on the desired feature list for new filesystems; compressing data on the fly allows the system to make better use of both storage space and I/O bandwidth, at the cost of some extra CPU time. The "transparent" in the name indicates that user space need not be aware that the data is compressed, making the feature easy to use. Thus, filesystems like btrfs support transparent compression, while Tux3 has [a draft design](<https://lwn.net/Articles/561651/>) toward that end. A recent proposal to add compression support to ext4, however, takes a bit of a different approach. The idea may run into trouble on its way into a mainline kernel, but it is indicative of how some developers are trying to get better performance out of the system. 
+
+Dhaval Giani's [patch](<https://lwn.net/Articles/561287/>) does not implement transparent compression; instead, the feature is transparent _de_ compression. With this feature, the kernel will allow an application to read a file that has been compressed without needing to know about that compression; the kernel will handle the process of decompressing the data in the background. The creation of the compressed file is not transparent, though; that must be done in user space. Once the file has been created and marked as compressed (using `chattr`), it cannot be changed, only deleted and replaced. So this feature enables the transparent use of read-only compressed files, but only after somebody has taken the time to set those files up specially. 
+
+This feature is aimed at a rather narrow use case: enabling Firefox to launch more quickly. Desktop users will (as Taras Glek [notes](<https://lwn.net/Articles/561657/>)) benefit from this feature, but the target users are on Android. Such systems tend to have relatively slow storage devices — slow enough that compressing the various shared objects that make up the Firefox executable and taking the time to decompress them in the CPU is a net win. Decompression at startup time slows things down, but it is still faster than reading the uncompressed data from a slow drive. Firefox currently uses its own custom dynamic linker to load compressed libraries (such as `libxul.so`) during startup. Moving the decompression code into the filesystem would allow the Firefox developers to dispense with their custom linker. 
+
+Dhaval's implementation has a few little problems that could get in the way of merging. Decompression must happen in a single step into a single buffer, so the application must read the entire file in a single `read()` call; that makes the feature a bit less than fully transparent. Mapping compressed files into memory with `mmap()` is not supported. The "szip" compression format is hardwired into the implementation. A new member is added to the `file_operations` structure to read compressed files. And so on. These shortcomings are understood and acknowledged from the outset; Dhaval's main purpose in posting the code at this time was to get feedback on the general design. He plans to fix these issues in subsequent versions of the patch. 
+
+But fixing all of those problems will not help if the core filesystem maintainers (who have, thus far, remained silent) object to the intent of the patch. A normal expectation when dealing with filesystems is that data written with `write()` will look the same when retrieved by a subsequent `read()` call. The transparent decompression patch violates that assumption by having the kernel interpret and modify the data written to disk — something the kernel normally tries hard not to do. 
+
+Having the kernel interpret the data stream could perhaps be countenanced if there were a compelling reason to add this functionality to the kernel. But, if such a reason exists, it was not presented with the patch set. Firefox has already solved this problem with its own dynamic linker; that solution lives entirely in user space. A fundamental rule of kernel design is that work should not be done in the kernel if it can be done equally well in user space; that suggests that an in-kernel implementation of file decompression would have to be somehow better than what Firefox is using now. Perhaps an in-kernel implementation _is_ better, but that case has not yet been made. 
+
+The end result is that Dhaval's patch is unlikely to receive serious consideration at this point. Before kernel developers look at the details of a patch, they usually want to know why the patch exists in the first place — how does that patch make the system better than before? That "why" is not yet clear, so the contents of the patch itself are not entirely relevant. That may be part of why this particular patch set has not received much in the way of feedback in the first week after it was posted. Transparent decompression is an interesting idea for speeding application startup with a relatively easy kernel hack; hopefully the next iteration will contain a stronger justification for why it has to be a kernel hack in the first place.

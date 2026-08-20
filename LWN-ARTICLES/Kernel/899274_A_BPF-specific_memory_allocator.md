@@ -1,0 +1,44 @@
+---
+title: "A BPF-specific memory allocator"
+url: https://lwn.net/Articles/899274/
+date: "June 30, 2022"
+category: "BPF-Memory management; Memory management-BPF; Releases-6.1"
+author: "By Jonathan Corbet June 30, 2022"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jonathan Corbet**  
+June 30, 2022
+
+The kernel does not lack for memory allocators, so one might well question the need for yet another one. As [this patch set](<https://lwn.net/ml/bpf/20220623003230.37497-1-alexei.starovoitov@gmail.com/>) from Alexei Starovoitov makes clear, though, the BPF subsystem feels such a need. The proposed new allocator is intended to increase the reliability of allocations made within BPF programs, which might be run in just about any execution context. 
+
+Allocating memory in the kernel can be tricky in the best of situations. Depending on the execution context at the time, the memory-management subsystem may or may not have various options available to find memory if an allocation request cannot be immediately satisfied. For example, memory can be freed by pushing its contents out to persistent storage, but if memory is requested from within a filesystem, calling back into that filesystem to write out data could cause deadlocks and is thus not an option. In many kernel contexts, it is not possible to sleep to wait for memory to become free. If the kernel is currently handling a [non-maskable interrupt (NMI)](<https://en.wikipedia.org/wiki/Non-maskable_interrupt>) from the CPU, the options are even more limited. 
+
+Most kernel code is written to run within a specific context and with an awareness of the available memory-allocation options; that information is passed to the memory-management subsystem via the GFP flags supplied with allocation requests. When a specific function can be invoked in multiple contexts, it generally must allocate memory as if it were always running in the most restrictive possible context; this can be inconvenient for developers. 
+
+Over the years, mechanisms like [memory pools](<https://www.kernel.org/doc/html/latest/core-api/mm-api.html?highlight=mempool#memory-pools>) ("mempools"), which pre-allocate a certain amount of memory to ensure that it will be available when it is needed, have been developed to make life easier. Naturally, mempools quickly created a new problem: kernel developers adopted mempools as a way of insulating themselves from memory-allocation failures. Before long, much of the kernel's memory was tied up in mempools and unavailable where it was actually needed. Over the years, a balance has mostly been found between overenthusiastic mempool use and being unable to allocate memory in critical situations. 
+
+#### Mempools for BPF
+
+BPF programs can be run in just about any context imaginable; that is especially true of tracing programs. A given BPF program might be attached to a function that runs in atomic context, in response to hardware interrupts, or even one that handles NMIs. That makes allocation of memory an uncertain affair and that, in turn, makes life harder for the BPF verifier, which is meant to ensure that BPF programs will be well-behaved in all situations. BPF programs do not normally allocate memory directly, but they can do so indirectly by, for example, storing data in a BPF map. Having such an operation fail can create any number of follow-on problems. 
+
+The proposed BPF-specific allocator can be thought of as a sort of mempool that is specialized for the needs of BPF programs. As with mempools, the purpose is to create a cache of pre-allocated memory in a relatively relaxed context so that it is readily available in more restrictive times. While a mempool is, at its core, a cache made up of a single list of available objects of a single size, the BPF caches are somewhat more elaborate. At a minimum, a BPF cache consists of two lists of free objects of a single size (one for most allocations, one for allocations while handling NMIs) — for every CPU in the system. A more elaborate variant has eleven pairs of per-CPU lists for objects of eleven different sizes; that is 22 free-object lists for each CPU. 
+
+The core mechanism is straightforward enough: when a BPF program needs to allocate memory, it calls into the cache much as if it were calling [`kmem_cache_alloc()`](<https://www.kernel.org/doc/html/latest/core-api/mm-api.html?highlight=kmem_cache_alloc#c.kmem_cache_alloc>) (for a single-size cache) or [`kmalloc()`](<https://www.kernel.org/doc/html/latest/core-api/mm-api.html?highlight=kmalloc#c.kmalloc>) (for objects of variable size). A free object will be removed from the appropriate list for the current CPU and returned to the caller; an NMI-specific list will be used only if an NMI is being handled at the time. When objects are freed, they are returned to the appropriate per-CPU list for the current CPU, which may not be the CPU on which they were allocated. These operations are performed with interrupts and migration disabled, so they can happen without the need for any other sort of locking. Assuming that the cache is not exhausted, BPF programs will be able to safely allocate memory in any context. 
+
+When a cache is first set up, it will be populated with a maximum of four objects of each size in each regular list, and one of each size in each NMI list (for each CPU, of course). Whenever a object is allocated from a list, though, the number of available items is compared against a low watermark, which is 32 objects; if it is below that value, the `irq_work` mechanism is used to call a function to expand the list to 64 items. On non-realtime kernels, this work will happen in a kernel thread, where memory allocations are relatively unconstrained. 
+
+Similarly, whenever an object is returned to the BPF allocator, the length of the list is compared against the high watermark (96 items); if the list is too long, some objects will be returned to the kernel to bring the number of items down to 64\. This prevents a cache from accumulating too many objects; it also deals with imbalances that may result if objects are allocated on one CPU and released on a different one. 
+
+#### Memory use
+
+It is worth noting that these caches are not global objects; they are allocated independently for each user. For example, one cache is established for every hash map used by BPF programs, of which there could be many. It is thus natural to wonder about just how much memory might be consumed by these caches in a busy system. The behavior described above is clearly intended to make memory available for ready allocation while limiting the total amount of memory that sits in the cache itself. It is logical to expect that most users will not allocate objects of every available size on every available CPU, and most of them will never run in response to an NMI. Keeping hundreds of objects around just in case something like that does happen would be wasteful, so the BPF memory caches start with a minimal number of objects and each list will only be filled when actual allocations occur from that list. 
+
+Still, it seems reasonable to worry that these caches could grow to consume an excessive amount of memory, especially if there are a lot of them. Cache allocations are counted against the memory control-group limit, if one is in place, but there is no other limit on the memory that can be dedicated to BPF caches. There is no shrinker mechanism that could reduce the size of the caches should the kernel find itself in need of memory elsewhere, and there is no accounting to show how many of these caches exist or how much memory is currently allocated to them. 
+
+The only user of this mechanism added by this patch set is the hash-map implementation; it uses the fixed-size option. The existence of the `kmalloc()`-style option, though, suggests that there are other near-term users in mind. 
+
+In response to the posting, Christoph Hellwig [suggested](<https://lwn.net/ml/bpf/YrlWLLDdvDlH0C6J@infradead.org/>) that Starovoitov talk with the maintainers of the existing slab allocators before proceeding. There have been few responses from the memory-management developers to patch series thus far, though, so it is not clear what their thoughts on the matter are. This new allocator is entirely contained within the BPF code and does not touch the memory-management subsystem, so it could, in principle, proceed without their involvement. That said, the memory-management developers have some expertise in this area and are likely to have some useful thoughts on how this problem should be solved.

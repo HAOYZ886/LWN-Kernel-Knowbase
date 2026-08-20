@@ -1,0 +1,42 @@
+---
+title: Toward better handling of hardware vulnerabilities
+url: https://lwn.net/Articles/764593/
+date: "September 12, 2018"
+category: "Development model-Security issues; Security-Meltdown and Spectre"
+author: "By Jonathan Corbet September 12, 2018"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+September 12, 2018
+
+From the kernel development community's point of view, hardware vulnerabilities are not much different from the software variety: either way, there is a bug that must be fixed in software. But hardware vendors tend to take a different view of things. This divergence has been reflected in the response to vulnerabilities like Meltdown and Spectre which was seen by many as being severely mismanaged. A recent [discussion](<https://lwn.net/ml/ksummit-discuss/nycvar.YFH.7.76.1809062054450.15880@cbobk.fhfr.pm/>) on the Kernel Summit discussion list has shed some more light on how things went wrong, and what the development community would like to see happen when the next hardware vulnerability comes around. 
+
+The definitive story of the response to Meltdown and Spectre has not yet been written, but a fair amount of information has shown up in bits and pieces. Intel was first notified of the problem in July 2017, but didn't get around to telling anybody in the the Linux community about it until the end of October. When that disclosure happened, Intel [did not allow](<http://www.eweek.com/security/linux-kernel-developer-criticizes-intel-for-meltdown-spectre-response>) the community to work together to fix it; instead each distributor (or other vendor) was mostly left on its own and not allowed to talk to the others. Only at the end of December, right before the disclosure (and the year-end holidays), were members of the community allowed to talk to each other. 
+
+The results of this approach were many, and few were good. The developers charged with responding to these problems were isolated and under heavy stress for two months; they still have not been adequately thanked for the effort they put in. Many important stakeholders, including distributions like Debian and the "tier-two" cloud providers, were not informed at all prior to the general disclosure and found themselves scrambling. Different distributors shipped different fixes, many of which had to be massively revised before entry into the mainline kernel. When the dust settled, there was a lot of anger left simmering in its wake. 
+
+By all accounts, the handling of the recently disclosed [L1TF vulnerability](<https://lwn.net/Articles/762570/>) was much better. As Thomas Gleixner, who has been heavily involved in dealing with both sets of vulnerabilities, [put it](<https://lwn.net/ml/ksummit-discuss/alpine.DEB.2.21.1809081037440.1402@nanos.tec.linutronix.de/>): 
+
+Contrary to Meltdown/Spectre Intel informed us about L1Tf halfways early and allowed _all_ involved parties to talk to each other. There were still some rough edges to bring key people like Greg [Kroah-Hartman] in, but that was a minor nuisance compared to the whole Meltdown/Spectre mess. 
+
+So it would appear that something has been learned in the last year. That said, the kernel community, under the reasonable impression that the last hardware vulnerability has not yet been seen, would like to find ways to make the process work even better. As is often the case, that seems to involve convincing vendors to stop sticking with procedures developed for a proprietary world and deal with the community on something closer to its own terms. 
+
+One sticking point is non-disclosure agreements (NDAs). They tend to be a fact of life in the technology industry, but NDAs do tend to run counter to how the community actually works. Resolving a complex hardware vulnerability can require bringing in more developers late in the game as the implications of the problem become clear, but the NDA process can make that difficult or impossible, even if the developers involved are willing to sign such an agreement. As Gleixner [explained](<https://lwn.net/ml/ksummit-discuss/alpine.DEB.2.21.1809101026160.1402@nanos.tec.linutronix.de/>), that complicated the response to L1TF: 
+
+We were able to communicate freely between the informed parties and their allowed to know kernel developers, even across vendors. But there was no simple way to bring in anybody else. It took us almost 2 months to get GregKH on board, but there was no way to talk to e.g. the BPF folks in time. 
+
+There were suggestions that a community-wide NDA should be negotiated, but actually making that happen is a daunting prospect. Even if the vendors could be convinced to join such a scheme, many developers are likely to resist. Both [Kroah-Hartman](<https://lwn.net/ml/ksummit-discuss/20180908113411.GA3111@kroah.com/>) and [Linus Torvalds](<https://lwn.net/ml/ksummit-discuss/CA+55aFwiW9eeC0Z1+HnhCVzH=LmfBQfpdFZ0eYSuHdp5U6bpEg@mail.gmail.com/>) have made it clear that they will not be signing any NDAs for this purpose. 
+
+What may be more likely to happen is the approach taken by Torvalds now: ""I've had a gentleman's agreement with companies - nothing legally binding, but over the years people have come to realize that the leaks don't come from me"". The "gentleman's agreement" (perhaps better called something like "gentlehacker's agreement") idea has some appeal in both the community and the industry, it seems. It has been shown to work with various developers over time, and it is evidently well understood that the power of an NDA to actually compel non-disclosure is nearly nonexistent. Dave Hansen [noted](<https://lwn.net/ml/ksummit-discuss/cd13e5bd-1d1f-4e0b-4a64-ee6251172888@sr71.net/>) that what companies really want is to feel that the information is under control, and that some companies have managed to find ways to get that ""warm and fuzzy feeling"" without using NDAs. It would be good for companies that have made progress in this area to share their experience, he said: 
+
+I *do* wish that companies like Intel who are actively doing these non-NDA things would find some way to share their methods. Maybe the LF can help here by providing a semi-anonymous way for folks to share what has worked. Or, maybe folks like Intel need to just do it ourselves. 
+
+With luck, over time, vendors will figure out the best ways to work with the community, much like they have with contributions of software. And, for those that don't, [Torvalds said](<https://lwn.net/ml/ksummit-discuss/CA+55aFwHH7cN0GXcV7trRs1zgdak+_e8-TyXEsXu62G5V_248A@mail.gmail.com/>) in his usual blunt style, the community should just refuse to deal with them. 
+
+One issue that remains difficult to address is backporting large security fixes to the stable kernels. As a kernel release gets older, this kind of backport gets harder, to the point that nobody is willing to do it. Thus, [Kroah-Hartman explained](<https://lwn.net/ml/ksummit-discuss/20180909125554.GB16474@kroah.com/>), the 4.4 kernels do not have the full L1TF fixes, and the Spectre fixes for 32-bit ARM processors do not go back past 4.18. When backports do happen, they tend to bring regressions with them. It's not clear that there will ever be a satisfactory solution to this problem, which is why developers tend to advise upgrading to more recent kernels. 
+
+One thing developers have said repeatedly is that, as noted in the introduction, hardware vulnerabilities look an awful lot like software vulnerabilities to kernel developers. Both must be fixed in software, and the community has some well-exercised procedures for fixing vulnerabilities in software. Those procedures include finding the developers whose expertise is needed to address a specific problem and telling them what they need to know. Many kernel developers have helped to fix vulnerabilities under this system, with minimal leakage of sensitive information prior to the official disclosure. Once vendors realize that the community's process works and can be trusted, the response to this type of problem will go much more smoothly for everybody involved.

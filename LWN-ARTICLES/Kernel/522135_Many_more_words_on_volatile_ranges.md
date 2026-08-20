@@ -1,0 +1,90 @@
+---
+title: Many more words on volatile ranges
+url: https://lwn.net/Articles/522135/
+date: "November 5, 2012"
+category: Memory management; Volatile ranges
+author: "By Michael Kerrisk November 5, 2012"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Michael Kerrisk**  
+November 5, 2012
+
+The volatile ranges feature provides applications that cache large amounts of data that they can (relatively easily) re-create--for example, browsers caching web content--with a mechanism to assist the kernel in making decisions about which pages can be discarded from memory when the system is under memory pressure. An application that wants to assist the kernel in this way does so by informing the kernel that a range of pages in its address space can be discarded at any time, if the kernel needs to reclaim memory. If the application later decides that it would like to use those pages, it can request the kernel to mark the pages nonvolatile. The kernel will honor that request if the pages have not yet been discarded. However, if the pages have already been discarded, the request will return an error, and it is then the application's responsibility to re-create those pages with suitable data. 
+
+#### Volatile ranges, take 12
+
+John Stultz first proposed patches to implement volatile ranges in November 2011\. As [we wrote](<https://lwn.net/Articles/468896/>) then, the proposed user-space API was via `POSIX_FADV_VOLATILE` and `POSIX_FADV_NONVOLATILE` operations for the `posix_fadvise()` system call. Since then, it appears that he has submitted at least another eleven iterations of his patch, incorporating feedback and new ideas into each iteration. Along the way, some [feedback](<https://lwn.net/Articles/516434/>) from David Chinner caused John to revise the API, so that a [later patch series](<https://lwn.net/Articles/500382/>) instead used the `fallocate()` system call, with two new flags, `FALLOCATE_FL_MARK_VOLATILE` and `FALLOCATE_FL_UNMARK_VOLATILE`. 
+
+The volatile ranges patches were also the subject of a [discussion](<https://lwn.net/Articles/516537/>) at the 2012 Linux Kernel Summit memcg/mm minisummit. What became clear there was that few of the memory management developers are familiar with John's patch set, and he appealed for more review of his work, since there were some implementation decisions that he didn't feel sufficiently confident to make on his own. As ever, getting sufficient review of patches is a challenge, and the various iterations of John's patches are a good case in point: several iterations of his patches received no or little substantive feedback. 
+
+Following the memcg/mm minisummit, John submitted a new round of patches, in an attempt to move this work further forward. His [latest patch set](<https://lwn.net/Articles/518130/>) begins with a lengthy discussion of the implementation and outlines a number of open questions. 
+
+The general design of the API is largely unchanged, with one notable exception. During the memcg/mm minisummit, John noted that repeatedly marking pages volatile and nonvolatile could be expensive, and was interested in ideas about how the kernel could do this more efficiently. Instead, Taras Glek (a Firefox developer) and others suggested an idea that could side-step the question of how to more efficiently implement the kernel operations: if a process attempts to access a volatile page that has been discarded from memory, then the kernel could generate a `SIGBUS` signal for the process. This would allow a process that wants to briefly access a volatile page to avoid the expense of bracketing the access with calls to unmark the page as volatile and then mark it as volatile once more. 
+
+Instead, the process would access the data, and if it received a `SIGBUS` signal, it would know that the data at the corresponding address needs to be re-created. The `SIGBUS` signal handler can obtain the address of the memory access that generated the signal via one of its arguments. Given that information, the signal handler can notify the application that the corresponding address range must be unmarked as volatile and repopulated with data. Of course, an application that doesn't want to deal with signals can still use the more expensive unmark/access/mark approach. 
+
+There are still a number of open questions regarding the API. As noted above, following Dave Chinner's feedback, John revised the interface to use the `fallocate()` system call instead of `posix_fadvise()`, only to have it suggested by other memory management maintainers at the memcg/mm minisummit that `posix_fadvise()` or `madvise()` would be better. The latest implementation still uses `fallocate()`, though John thinks his original approach of using `posix_fadvise()` is slightly more sensible. In any case, he is still seeking further input about the preferred interface. 
+
+The volatile ranges patches currently only support mappings on `[tmpfs](<http://en.wikipedia.org/wiki/Tmpfs>)` filesystems, and marking or unmarking a range volatile requires the use of the file descriptor corresponding to the mapping. In his mail, John explained that Taras finds the file-descriptor-based interface rather cumbersome: 
+
+In talking with Taras Glek, he pointed out that for his needs, the fd based interface is a little annoying, as it requires having to get access to tmpfs file and mmap it in, then instead of just referencing a pointer to the data he wants to mark volatile, he has to calculate the offset from start of the mmap and pass those file offsets to the interface. 
+
+John acknowledged that an `madvise()` interface would be nice, but it raises some complexities. The problem with an `madvise()` interface is that it could be more generally applied to any part of the process's address space. However, John wondered what semantics could be attached to volatile ranges that are applied to anonymous mappings (e.g., when pages are duplicated via copy-on-write, should the duplicated page also be marked volatile?) or file-mappings on non-`tmpfs` filesystems. Therefore, the latest patch series provides only the file-descriptor-based interface. 
+
+There are a number of other subtle implementation details that John has considered in the volatile ranges implementation. For example, if a large page range is marked volatile, should the kernel perform a partial discard of pages in the range when under memory pressure, or discard the entire range? In John's estimation, discarding a subset of the range probably destroys the "value" of the entire range. So the approach taken is to discard volatile ranges in their entirety. 
+
+Then there is the question of how to treat volatile ranges that overlap and volatile ranges that are contiguous. Overlapping ranges are coalesced into a single range (which means they will be discarded as a unit). Contiguous ranges are slightly different. The current behavior is to merge them if neither range has yet been discarded. John notes that coalescing in these circumstances may not be desirable: since the application marked the ranges volatile in separate operations, it may not necessarily wish to see both ranges discarded together. 
+
+But at this point a seeming oddity of the current implementation intervenes: the volatile ranges implementation deals with address ranges at a byte level of granularity rather than at the page level. It is possible to mark (say) a page and half as volatile. The kernel will only discard complete volatile pages, but, if a set of contiguous sub-page ranges covering an entire page is marked volatile, then coalescing the contiguous ranges allows the page to be discarded if necessary. In response to this and various other points in John's lengthy mail, Neil Brown [wondered](<https://lwn.net/Articles/522245/>) if John was: 
+
+trying to please everyone and risked pleasing no-one… For example, allowing sub-page volatile region seems to be above and beyond the call of duty. You cannot mmap sub-pages, so why should they be volatile? 
+
+John responded that it seemed sensible from a user-space point of view to allow sub-page marking and it was not too complex to implement. However, the use case for byte-granularity volatile ranges is not obvious from the discussion. Given that the goal of volatile ranges is to assist the kernel in freeing up what would presumably be a significant amount of memory when the system is under memory pressure, it seems unlikely that a process would make multiple system calls to mark many small regions of memory volatile. 
+
+Neil also questioned the use of signals as a mechanism for informing user space that a volatile range has been discarded. The problem with signals, of course, is that their asynchronous nature means that they can be difficult to deal with in user-space applications. Applications that handle signals incorrectly can be prone to subtle race errors, and signals do not mesh well with some other parts of the user-space API, such as POSIX threads. John [replied](<https://lwn.net/Articles/522743/>): 
+
+Initially I didn't like the idea, but have warmed considerably to it. Mainly due to the concern that the constant unmark/access/mark pattern would be too much overhead, and having a lazy method will be much nicer for performance. But yes, at the cost of additional complexity of handling the signal, marking the faulted address range as non-volatile, restoring the data and continuing. 
+
+There are a number of other unresolved implementation decisions concerning the order in which volatile range pages should be discarded when the system is under memory pressure, and John is looking for input on those decisions. 
+
+A good heuristic is required for choosing which ranges to discard first. The complicating factor here is that a volatile page range may contain both frequently and rarely accessed data. Thus, using the least recently used page in a range as a metric in the decision about whether to discard a range could cause quite recently used pages to be discarded. The Android ashmem implementation (upon which John's volatile ranges work is based) employed an approach to this problem that works well for Android: volatile ranges are discarded in the order in which they are marked volatile, and, since applications are not supposed to touch volatile pages, the least-recently-marked-volatile order provides a reasonable approximation of least-recently-used order. 
+
+But the `SIGBUS` semantics described above mean that an application could continue to access a memory region after marking it as volatile. Thus, the Android approach is not valid for John's volatile range implementation. In theory, the best solution might be to evaluate the age of the most recently used page in each range and then discard the range with the oldest most recently used page; John suspects, however, that there may be no efficient way of performing that calculation. 
+
+Then there is the question of the relative order of discarding for volatile and nonvolatile pages. Initially, John had thought that volatile ranges should be discarded in preference to any other pages on the system, since applications have made a clear statement that they can recover if the pages are lost. However, at the memcg/mm minisummit, it was pointed out that there may be pages on the system that are even better candidates for discarding, such as pages containing streamed data that is unlikely to be used again soon (if at all). However, the question of how to derive good heuristics for deciding the best relative order of volatile pages versus various kinds of nonvolatile pages remains unresolved. 
+
+One other issue concerns NUMA-systems. John's latest patch set uses a shrinker-based approach to discarding pages, which allows for an efficient implementation. However, (as was [discussed at the memcg/mm minisummit](<https://lwn.net/Articles/516531/>)) shrinkers are not currently NUMA-aware. As a result, when one node on a multi-node system is under memory pressure, volatile ranges on another node might be discarded, which would throw data away without relieving memory pressure on the node where that pressure is felt. This issue remains unresolved, although some ideas have been put forward about possible solutions. 
+
+#### Volatile anonymous ranges
+
+In the thread discussing John's patch set, Minchan Kim [raised](<https://lwn.net/Articles/522651/>) a somewhat different use case that has some similar requirements. Whereas John's volatile ranges feature operates only on `tmpfs` mappings and requires the use of a file descriptor-based API, Minchan expressed a preference for an `madvise()` interface that could operate on anonymous mappings. And whereas John's patch set employs its own address-range based data structure for recording volatile ranges, Minchan proposed that volatility could be an implemented as a new VMA attribute, `VM_VOLATILE`, and `madvise()` would be used to set that attribute. Minchan thinks his proposal could be useful for user-space memory allocators. 
+
+With respect to John's concerns about copy-on-write semantics for volatile ranges in anonymous pages, Minchan suggested volatile pages could be discarded so long as all VMAs that share the page have the `VM_VOLATILE` attribute. Later in the thread, he said he would soon try to implement a prototype for his idea. 
+
+Minchan proved true to his word, and released a first version of his prototype, quickly followed by a [second version](<https://lwn.net/Articles/522154/>), where he explained that his RFC patch complements John's work by introducing: 
+
+new madvise behavior MADV_VOLATILE and MADV_NOVOLATILE for anonymous pages. It's different with John Stultz's version which considers only tmpfs while this patch considers only anonymous pages so this cannot cover John's one. If below idea is proved as reasonable, I hope we can unify both concepts by madvise/fadvise. 
+
+Minchan detailed his earlier point about user-space memory allocators by saying that many allocators call `munmap()` when freeing memory that was allocated with `mmap()`. The problem is that `munmap()` is expensive. A series of page table entries must be cleaned up, and the VMA must be unlinked. By contrast, `madvise(MAD_VOLATILE)` only needs to set a flag in the VMA. 
+
+However, Andrew Morton [raised some questions](<https://lwn.net/Articles/522667/>) about Minchan's use case: 
+
+Presumably the userspace allocator will internally manage memory in large chunks, so the munmap() call frequency will be much lower than the free() call frequency. So the performance gains from this change might be very small. 
+
+The whole point of the patch is to improve performance, but we have no evidence that it was successful in doing that! I do think we'll need good quantitative testing results before proceeding with such a patch, please. 
+
+Paul Turner also [expressed](<https://lwn.net/Articles/522671/>) doubts about Minchan's rationale, noting that the `[tcmalloc()](<http://goog-perftools.sourceforge.net/doc/tcmalloc.html>)` user-space memory allocator uses the `madvise(MADV_DONTNEED)` operation when discarding large blocks from `free()`. That operation informs the kernel that the pages can be (destructively) discarded from memory; if the process tries to access the pages again, they will either be faulted in from the underlying file, for a file mapping, or re-created as zero-filled pages, for the anonymous mappings that are employed by user-space allocators. Of course, re-creating the pages zero filled is normally exactly the desired behavior for a user-space memory allocator. In addition, `MADV_DONTNEED` is cheaper than `munmap()` and has the further benefit that no system call is required to reallocate the memory. (The only potential downside is that process address space is not freed, but this tends not to matter on 64-bit systems.) 
+
+Responding to Paul's point, Motohiro Kosaki [pointed out](<https://lwn.net/Articles/522679/>) that the use of `MADV_DONTNEED` in this scenario is sometimes the source of significant performance problems for the glibc `malloc()` implementation. However, he was unsure whether or not Minchan's patch would improve things. 
+
+Minchan acknowledged Andrew's questioning of the performance benefits, noting that his patch was sent out as a request for comment; he agreed with the need for performance testing to justify the feature. [Elsewhere in the thread](<https://lwn.net/Articles/522684/>), he pointed to some performance measurements that accompanied a similar patch proposed some years ago by Rik van Riel; looking at those numbers, Minchan believes that his patch may provide a valuable optimization. At this stage, he is simply looking for some feedback about whether his idea warrants some further investigation. If his `MADV_VOLATILE` proposal can be shown to yield benefits, he hopes that his approach can be unified with John's work. 
+
+#### Conclusion
+
+Although various people have expressed an interest in the volatile ranges feature, its progress towards the mainline kernel has been slow. That certainly hasn't been for want of effort by John, who has been steadily refining his well-documented patches and sending them out for review frequently. How that progress will be affected by Minchan's work remains to be seen. On the positive side, Minchan--assuming that his own work yields benefits--would like to see the two approaches integrated. However, that effort in itself might slow the progress of volatile ranges toward the mainline. 
+
+Given the user-space interest in volatile ranges, one supposes that the feature will eventually make its way into the kernel. But clearly, John's work, and eventually also Minchan's complementary work, could do with more review and input from the memory management developers to reach that goal.

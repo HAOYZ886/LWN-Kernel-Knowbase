@@ -1,0 +1,105 @@
+---
+title: "Atomic mode setting design overview, part 1"
+url: https://lwn.net/Articles/653071/
+date: "August 5, 2015"
+category: "Device drivers-Graphics"
+author: "August 5, 2015 This article was contributed by Daniel Vetter"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+August 5, 2015
+
+This article was contributed by Daniel Vetter
+
+Over the past few years, two big trends forged the need for a completely new kernel display driver interface. On one hand, people stopped appreciating partial redrawing and windows torn to pieces when anything changed in their GUI. New compositors like Wayland have been created with the slogan that "every frame is perfect". On the other hand, there are battery-powered phones and tablets with fancy graphical interfaces, but serious limits on power consumption. And that brought along an explosion of special-purpose display hardware to help out the rather power-hungry, but more general purpose, GPU in compositing screen contents. Bringing these trends together yields the need to update a lot of display hardware state in an all-or-nothing, atomic manner to ensure every frame is perfect and all the power-usage-optimized hardware is used as much as possible. 
+
+After a few years of development, the atomic display update `ioctl()` for Direct Rendering Manager (DRM) drivers is finally ready for prime time with the [4.2 pull request from Dave Airlie](<http://mid.mail-archive.com/alpine.DEB.2.00.1506260158440.13786@skynet.skynet.ie>). It's been a long road, with a lot of drivers [already converted over to atomic](<http://blog.ffwll.ch/2014/11/atomic-modeset-support-for-kms-drivers.html>) and even more in progress, and the [atomic helper libraries and support code](<http://blog.ffwll.ch/2015/01/update-for-atomic-display-updates.html>) in the DRM subsystem sufficiently polished. But what's really missing is a design overview of what the overall atomic infrastructure looks like and why some decisions and details are implemented the way they are. 
+
+This article, which is first of the two articles in a series, will start with a recap of the history of kernel display mode-setting support to explain how the older interfaces came to be and why they're no longer suitable. It will then look at out-of-tree solutions and finally cover what the merged atomic display update interface looks like. The second article will delve deeper into some of the details of the implementation.
+
+Before digging into all the details, a quick overview over how display hardware is represented today in the DRM subsystem is needed. First there is `struct drm_connector` which represents a screen, whether that's an integrated panel or an external screen. Note that connectors can be hot-plugged nowadays, since DisplayPort supports branching and multiplexing of multiple devices over one cable, similar to other peripheral buses. At the other end there's `struct drm_plane`, representing a scanout engine that reads pixel data from memory represented by a `struct drm_framebuffer` and provides it to the display hardware. 
+
+To allow drivers to support hardware features beyond what's possible with the core control data for each object, DRM supports properties that can be attached to any DRM object. There are different types of properties that accept different inputs like enumerations (e.g. for selecting between upscaling modes like pillarbox or letterbox) or integer ranges (e.g. for brightness control). 
+
+With fancy hardware, a plane can be freely positioned in the output rectangle, scaled or otherwise adjusted. Both ends are tied together with a `struct drm_crtc` which represents a display pipeline. Note that CRTC means "cathode ray tube controller" and hence is one of those abbreviations that only make historical sense. Multiple planes can be connected to a single CRTC to provide it with input data, and such a display pipeline then, in turn, connects to one or more `drm_connector`s to actually show something on screens. Besides being the central object for routing, a CRTC also keeps track of other settings like the display mode (i.e. refresh rate and resolution) used by the display pipeline and the background color that should be shown where no plane is visible at all. 
+
+####  The old world — A pile of `ioctl()` commands and properties
+
+There's a much better and detailed [writeup](<http://ppaalanen.blogspot.ch/2014/06/from-pre-history-to-beyond-global.html>) of the mode-setting history around, so I'll just focus on the more recent bits. The new age of display drivers in the kernel started in earnest almost seven years ago with the initial merge of the [KMS (kernel mode setting) support](<https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=f453ba0460742ad027ae0c4c7d61e62817b3e7ef>). Well, there was always [fbdev](<https://en.wikipedia.org/wiki/Linux_framebuffer>), but that subsystem never gained dearly needed support for proper graphics memory management, didn't have a clean separation between display and rendering, and never solved a host of other troubles. 
+
+Initial KMS `ioctl()` commands were modeled after X's user-space mode-setting protocol [XRandR](<http://www.x.org/wiki/Projects/XRandR/>), which means they were good enough to set modes on screens individually and connect a single primary framebuffer object (representing a driver-specific memory buffer) with that display. This was all designed when rotating desktop cubes were all the rage and everyone wanted to use the 3D rendering engine for desktop compositing only — old-style video overlay planes seriously fell out of favor (you can't wobble them!) and hence weren't supported at all.
+
+Well, there was one exception: cursor support. But that was just a bolted-on `ioctl()` that didn't even use the KMS framebuffer abstraction. And cursor updates couldn't be synced to anything, neither primary framebuffer updates nor the vertical blank — X didn't need it and couldn't use it. Without synchronizing to the vertical blanking (Vsync for short), the screen redrawing can race with the update and result in ugly tearing effects. Later on [non-blocking updates for the primary plane](<https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=d91d8a3f88059d93e34ac70d059153ec69a9ffc7>) were added to have support for proper Vsynced, non-tearing updates of the primary plane.
+
+Of course, then smartphones and tablets showed up, so it wasn't cool to blow through power for display anymore. Suddenly overlay planes became important again since they're much more power-efficient in some narrow but popular use cases like video playback. KMS gained support for them in the form of [additional plane objects](<https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/commit/?id=8cf5c9177151537e73ff1816540e4ba24b174391>) and a new set of `ioctl()` commands. 
+
+But, like cursor updates, plane updates couldn't be synced to anything else, neither plane updates nor Vsync, again because X couldn't do more and nothing else cared about upstream graphics. The result was a mess of three different `ioctl()` interfaces for essentially just different instances of the same hardware. Planes, whether primary, cursor, or overlay, all take a framebuffer object that then all get blended together somehow, before being fed to a display pipeline (represented by a CRTC object in kernel mode setting), which feeds the connectors and panels. [ Unifying the plane interfaces](<http://cgit.freedesktop.org/~airlied/linux/commit/?id=2844ea3f252331cc0ecf3ae74f6226db2f580f8a>) was fairly simple: primary and cursor planes simply had to be exported as such, optionally, in order to not confuse existing user space.
+
+But there was still no unified `ioctl()` that could do it all; for example, only the primary plane supported non-blocking updates with precise completion events. And there was no interface to update multiple planes together — user space had to make multiple `ioctl()` calls and hope that the updates all happened in the same frame. That's obviously a no-go for modern compositors like Wayland that want to guarantee pixel-perfect updates for every frame.
+
+The other thing that happened is adding property support to all KMS objects to easily expose additional features like controlling the blending between planes, setting a background color, or rotating planes or the entire output. Of course, that was again done with a separate `ioctl()`. And, again, because X couldn't do any better back when this was introduced, there's no way to synchronize updates. Which means broken updates become ever more likely, as, for example when the rotation value is already updated but the plane contents aren't yet updated to match. If it's possible at all — some values can only be changed together or in a specific order, like disabling an additional plane before switching the primary one to a more memory-bandwidth-demanding mode.
+
+It was all a mess and in dire need of a solution. 
+
+####  Android's Atomic Display Framework
+
+Outside of upstream graphics, especially in Android-land, the situation was even worse. Every GPU vendor had its own kernel/user-space interfaces and all the drivers were reinventing the same wheels, but broken in slightly different ways. Google was unhappy about the state of things and created the [Atomic Display Framework](<https://lwn.net/Articles/565422/>) (ADF). It was inspired a bit by the upstream kernel mode-setting support, but was a completely new subsystem otherwise. For our tour, the overall design isn't useful to look at, but it's interesting to look at where ADF fell short for upstream use:
+
+  * ADF supports only one update queue for the entire device. That's a perfect fit for Android's SurfaceFlinger, which just has one draw loop, and it's totally sufficient for phones and tablets where, in most cases, you only ever have one screen. But if you have multiple screens, which usually run at slightly different refresh rates, then one update queue isn't enough. You have to either stall the faster screen or drop frames on the slower one, both of which will result in not-perfectly-smooth animations. The non-blocking primary plane updates in upstream are already fully decoupled and compositors like Wayland already have per-output redraw loops. This was a big omission from ADF.
+  * ADF describes atomic updates in a driver-specific blob of data. That's fine for Android where you have a GPU-specific counterpart driver in user space behind the Hardware Composer interface (similar to an X device driver like xf86-video-intel). But upstream also wants to support generic user-space compositors like Wayland or the xf86-video-modesetting X driver. ADF has a generic interface for updates, but it's only really good enough for a simple boot splash. Of course there will always be some features specific to one driver, but by standardizing properties across drivers, upstream DRM already has the infrastructure to support arbitrary functionality in generic user-space code.
+  * ADF was only atomic for plane updates and not for reconfiguring the output routing. Again, this is not a problem if you only really care about the single-screen case, but on modern GPUs there are lots of shared resources when using more than one output. And the naive way of reconfiguring by just looping over all outputs can easily end up in a state that isn't supported by the hardware, for example because the driver ran out of display clock generators for the interim configuration. Hence atomic updates for the entire pipeline across all outputs was definitely needed in upstream. More important was some means to figure out whether a change would work out or not before applying it and risking being stuck with a black screen.
+  * ADF was implemented as a [monolithic mid-layer subsystem](<https://lwn.net/Articles/336262/>). That's great if your goal is to improve the state of the art for 90% of all drivers and a real pain if your driver is one of the 10% where the mid-layer just doesn't fit. Despite some horror shows in some upstream DRM legacy subsystems, the mode-setting part is nicely structured by exposing the full interface from the `ioctl()` to the driver hooks and providing a big helper library for all the common cases. Definitely something to keep.
+  * ADF also has a completely new user-space ABI and driver interface, which would mean separate drivers for everything. Not desirable from a backward compatibility and maintenance point of view.
+
+Of course solving these problems isn't all that easy. The following sections in this article and the next one will look at some of them in more detail and describe how it's done in the atomic support that was merged.
+
+####  A generic driver interface that's actually useful
+
+Since DRM already has properties, it was fairly clear to reuse them as the generic transport for the user-space ABI. User space simply supplies a list of ` (object_id, property_id, value) ` triples. And that immediately takes care of extensibility — user space that doesn't understand a given property just doesn't ever change it. As long as a driver initializes everything to something sane (like setting the rotation property to unrotated) then older generic user space will keep on working when new features get added. 
+
+Of course there were some gaps with that plan — properties for all the existing metadata had to be added, with a special flag to only expose them to atomic-aware user space. A new property type has been created that accepts kernel mode-setting objects as values to set up routing links. And a few other bits needed adjustments, like extending blob properties to make them usable for atomic updates. 
+
+Allowing partial updates also solved the in-kernel backward compatibility problem: All the old KMS `ioctl()` commands did partial updates, only allowing full updates would have meant that drivers needed to support both legacy and atomic interfaces. With partial atomic update support, legacy driver hooks can instead be implemented in terms of the atomic driver entry points in a generic helper library.
+
+Finally, there was the question of exposing hardware and driver limitations to user space. There are many of those, and every time a new property is standardized it becomes more complex. Trying to describe constraints explicitly was quickly discarded as impossible; the only thing the kernel can do is reject requests for impossible states (or even just transitions, as sometimes that's the limiting factor). But that would require driver-specific user space, rendering all the effort with a generic interface moot. 
+
+Instead, the atomic `ioctl()` supports a `DRM_MODE_ATOMIC_TEST_ONLY` flag to not actually commit the update to the hardware. With this, generic user space can build up the state it wants step-by-step using some heuristics and test each time around whether the update will still work, until it's found the maximal configuration. For example, a compositor could add planes one-by-one in order of preference of what would save the most power when using a hardware plane to compose a given client buffer onto the screen and then fall back to using OpenGL for any remaining client buffers. It can then queue the real update once everything is ready with the assurance that it will work out. Assuming no bugs in drivers, of course. This way, generic user space can use hardware with really strange restrictions, without explicitly describing those restrictions in the interface. Of course it won't always make a perfect decision, but in most cases it will be good enough.
+
+This was all settled fairly quickly and, except for some cosmetics, the upstream atomic user-space ABI has stayed unchanged since the [first RFC](<http://www.spinics.net/lists/dri-devel/msg24399.html>) was floated about three years ago. The big question that took a few years to settle was the core-to-driver interface. Just passing the same list of triples to drivers would have been easiest and was done for proof-of-concept implementations. But that would have meant a brittle and verbose interface for in-kernel users, and for the final atomic support there would be a lot of those to handle all the legacy `ioctl()` commands and legacy users like fbdev emulation. Simply passing decoded structures around, like with the old hooks, wasn't an option either because of the need for driver-private extensions and partial updates.
+
+The currently merged solution is quite a bit of a beast. First there are generic state structures for each type of mode-setting object that you can assign properties for. The state structure for planes, for example, is:
+
+```
+struct drm_plane_state {
+    	struct drm_plane *plane;
+    
+    	struct drm_crtc *crtc;
+    	struct drm_framebuffer *fb;
+    
+    	/* Signed dest location allows it to be partially off screen */
+    	int32_t crtc_x, crtc_y;
+    	uint32_t crtc_w, crtc_h;
+    
+    	/* ... */
+    
+    	struct drm_atomic_state *state;
+        };
+```
+
+Every state structure has a pointer to the object the state is for. Then follows all the object-specific KMS state decoded into the kernel-internal representations. For planes, this is a pointer to the CRTC (which represents a display pipeline) the plane is attached to, and a pointer to the framebuffer it should scan out, the position of the plane on the display window, and a few other things left out for clarity. And, finally, a backpointer to a `drm_atomic_state` structure. This keeps track of all the various per-object states of an update, allowing partial updates at the object level. 
+
+When an update finally gets committed, a pointer to the state is stored in each object, here for planes that would be `plane->state`. When committing states, the `plane->state->state` backpointer is also cleared since, once committed, the state structure is owned by the driver and no longer owned by the update structure itself.
+
+Partial updates within an object are done by duplicating the existing state. And support for driver-private extensions is handled by allowing drivers to embed `struct drm_plane_state` into their own structures. That means there's an `->atomic_duplicate_state()` hook with a default implementation like `drm_atomic_helper_plane_duplicate_state()`. Since a few of the objects pointed at by state structures are reference counted (like framebuffers), there's also a `->atomic_destroy_state()` hook to clean everything up. For all the hooks there's a default implementation even when there's not yet a need for it — that way it's easy to standardize the handling of some properties by moving them from driver-specific structures into the core ones.
+
+This way, generic code and drivers that only implement generic properties never have to deal with the raw property IDs and values directly, as all the decoding is done in the core code implementing the atomic `ioctl()`. For fancy drivers, there's the `->atomic_set_property()` and `->atomic_get_property()` hooks that again operate on the state structures and are used for decoding additional properties.
+
+Besides all these functions and hooks to handle per-object state structures, the main atomic driver interface is simple and consists of only two hooks: 
+
+  * `->atomic_check()` needs to make sure that the passed-in atomic update is possible. It is only allowed to look at and write to state structures for objects referenced from the passed-in `struct drm_atomic_state`. On one hand, this is needed to make sure that the `TEST_ONLY` mode doesn't accidentally change persistent hardware or software state. The other reason is to make sure that concurrent updates don't trample on each another by accident — duplicating a state also grabs the required locks behind the scenes. Locking will be discussed in more detail in the second part of this article series.
+  * `->atomic_commit()` optionally commits the state that has been prepared and checked by `->atomic_check()`. Drivers are allowed and encouraged to store derived state (like display clock configuration) in the driver-private part of their state objects to avoid duplicating logic between the check and commit hooks. Note that for robustness, such derived state should be cleared when duplicating state objects, to make sure that correct values are always computed. The commit function is only allowed to fail due to lack of memory or catastrophic hardware failure. Any other problem with the update (like lack of shared resources on the GPU) must be caught earlier in the check callback.
+
+The next article will discuss a few more details of the interface around handling asynchronous updates and locking. Of course, drivers don't have to implement the main atomic hooks completely themselves, since that's anything but trivial — there's a large helper library that will also be covered.

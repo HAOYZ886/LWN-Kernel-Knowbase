@@ -1,0 +1,44 @@
+---
+title: "Dueling memory-management performance regressions"
+url: https://lwn.net/Articles/790985/
+date: "June 14, 2019"
+category: "Development model-Regressions; Memory management-Huge pages; Performance regressions"
+author: "By Jonathan Corbet June 14, 2019"
+---
+
+By **Jonathan Corbet**  
+June 14, 2019
+
+The [2019 Linux Storage, Filesystem, and Memory-Management Summit](<https://lwn.net/Articles/lsfmm2019/>) included [a detailed discussion](<https://lwn.net/Articles/787434/>) about a memory-management fix that addressed one performance regression while causing another. That fix, which was promptly reverted, is still believed by most memory-management developers to implement the correct behavior, so [a patch](<https://lwn.net/ml/linux-kernel/20190503223146.2312-3-aarcange@redhat.com/>) posted by Andrea Arcangeli in early May has relatively broad support. That patch remains unapplied as of this writing, but the discussion surrounding it has continued at a slow pace over the last month. Memory-management subsystem maintainer Andrew Morton is faced with a choice: which performance regression is more important? 
+
+The behavior in question relates to the intersection of transparent huge pages and NUMA policy. Ever since [this commit from Aneesh Kumar](<https://git.kernel.org/linus/077fcf116c8c>) in 2015, the kernel will, for memory areas where `madvise(MADV_HUGEPAGE)` has been called, attempt to allocate huge pages exclusively on the current NUMA node. It turns out that the kernel will try so hard that it will go into aggressive reclaim and compaction on that node, forcing out other pages, even if free memory exists on other nodes in the system. In essence, enabling transparent huge pages for a range of memory has become an equivalent to binding that memory to a single NUMA node. The result, as observed by many, can be severe swap storms and a dramatic loss of performance. 
+
+In an attempt to fix this problem, Arcangeli applied [a patch](<http://git.kernel.org/linus/ac5b2c18911ffe95>) in November 2018 that loosened the tight binding to the current node. But, it turned out, some workloads want that binding behavior. Local huge pages will perform better than huge pages on a remote node; even local small pages tend to be better than remote huge pages. For some tasks, the performance penalty for using remote pages is high enough that it is worth going to great lengths — even enduring a swap storm at application startup — to avoid it. No such workload has been publicly posted, but the patch [was reverted](<https://git.kernel.org/linus/2f0799a0ffc0>) by David Rientjes in December after [a huge discussion](<https://lwn.net/ml/linux-kernel/20181127062503.GH6163@shao2-debian/>). 
+
+The problem is that far more users appear to be affected by the swap storms than by non-local huge pages; if nothing else, the former problem is far easier to notice than the latter. So a number of distributions have reverted the revert, causing their kernels to have significantly different behavior than mainline kernels. The feeling that the reverting of Arcangeli's patch was a mistake appears to have grown over time, leading to the current attempt to reapply the patch and prioritize swap-storm avoidance over huge-page locality. 
+
+> **`$ sudo subscribe today`**
+> 
+> Subscribe today and elevate your LWN privileges. You’ll have access to all of LWN’s high-quality articles as soon as they’re published, and help support LWN in the process. [Act now](<https://lwn.net/Promo/nst-sudo/claim>) and you can start with a free trial subscription. 
+
+While most developers appear to support this change, not all do. In particular, Rientjes is [strongly in favor](<https://lwn.net/ml/linux-kernel/alpine.DEB.2.21.1905201018480.96074@chino.kir.corp.google.com/>) of retaining the current behavior: 
+
+We are going in circles, *yes* there is a problem for potential swap storms today because of the poor interaction between memory compaction and directed reclaim but this is a result of a poor API that does not allow userspace to specify that its workload really will span multiple sockets so faulting remotely is the best course of action. The fix is not to cause regressions for others who have implemented a userspace stack that is based on the past 3+ years of long standing behavior or for specialized workloads where it is known that it spans multiple sockets so we want some kind of different behavior. 
+
+Rientjes argued that the kernel does not currently provide an API that is adequate for all workloads to specify the behavior they need. He would rather see the addition of a `prctl()` call that would let an application say explicitly that its working set will not fit into a single node; after this call has been made, the kernel would allocate huge pages from remote nodes if need be. Various other calls could also be added to give applications (and administrators) more control over NUMA allocation policy for huge pages in particular. 
+
+There is little disagreement over whether the API should be improved, at least in principle. But, as Morton [pointed out](<https://lwn.net/ml/linux-kernel/20190523175737.2fb5b997df85b5d117092b5b@linux-foundation.org/>): ""Implementing a new API doesn't help existing userspace which is hurting from the problem which this patch addresses"". He, too, seems to believe that it would be better to address the swap-storm issue now, then work later to address the needs of applications that absolutely cannot live with remote huge-page allocations. 
+
+Rientjes [is adamant](<https://lwn.net/ml/linux-kernel/alpine.DEB.2.21.1906061451001.121338@chino.kir.corp.google.com/>) that the current semantics should be preserved, though. He has some thoughts on how the allocator could be changed to improve its behavior, mostly focused on avoiding aggressive reclaim in situations where it is unlikely to help. Michal Hocko [worried](<https://lwn.net/ml/linux-kernel/20190607083255.GA18435@dhcp22.suse.cz/>) that the proposed changes would make transparent huge-page allocation less effective in general, and pointed out that tweaking the allocator leaves the core problem unaddressed: 
+
+And really, fundamental problem here is that MADV_HUGEPAGE has gained a NUMA semantic without a due scrutiny leading to a broken interface with side effects that are simply making the interface unusable for a large part of usecases that the madvise was originally designed for. Until we find an agreement on this point we will be looping in a dead end discussion, I am afraid. 
+
+The discussion has also not been helped by the fact that Rientjes has not posted an example of a workload that suffers with Arcangeli's patch applied. The closest he came (""induce node local fragmentation (easiest to do by injecting a kernel module), do MADV_HUGEPAGE over a large range, fault, and measure random access latency"") proved to be somewhat unsatisfying. Without a workload to test against, other developers cannot know whether their changes make things better or worse, or even how severe the problem actually is. Hocko, for example, believes that the NUMA balancing built into the kernel now should straighten out workloads that may have initially had huge pages allocated on remote nodes, but nobody can demonstrate whether that is true or not. This has led Mel Gorman to [complain](<https://lwn.net/ml/linux-kernel/20190524100702.GD23719@suse.de/>): 
+
+I find it amazing that you think leaving users with trivial to reproduce swap storms is acceptable until some unreproducible workload can be fixed with some undefined set of unimplemented memory policies. 
+
+Gorman proposed an additional bit for the `zone_reclaim_mode` sysctl knob that might provide behavior closer to what Rientjes appears to need; that mode would be off by default but could be enabled for specific workloads. Rientjes has not responded to this proposal. 
+
+This discussion has, as numerous participants pointed out, gone around in circles for a while now. Other than Rientjes, no memory-management developers stepped up to defend the status quo; the consensus for applying Arcangeli's patch seems nearly complete. But there remains a real possibility that, should this patch make it to the mainline, complaints about performance regressions will cause it to be reverted — again — as a strict reading of the kernel's no-regressions policy would seem to require. 
+
+Everybody involved would prefer to avoid that course of events, thus the attempts to understand the problem and find a solution that works for everybody involved. But memory management is always a balancing act, even when full information about the workloads involved is available. In the absence of that information, developers are left groping for solutions in the dark, and achieving that balance becomes that much harder. In such situations, it may indeed make sense to apply a patch that fixes a known problem and which is already carried by multiple distributions.

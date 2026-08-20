@@ -1,0 +1,34 @@
+---
+title: "Guest-first memory for KVM"
+url: https://lwn.net/Articles/949277/
+date: "November 2, 2023"
+category: "Confidential computing; Memory management-Address-space isolation; Releases-6.8"
+author: "By Jonathan Corbet November 2, 2023"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+November 2, 2023
+
+One of the core objectives of any confidential-computing implementation is to protect a guest system's memory from access by actors outside of the guest itself. The host computer and hypervisor are part of the group that is to be excluded from such access; indeed, they are often seen as threat in their own right. Hardware vendors have added features like memory encryption to make memory inaccessible to the host, but such features can be difficult to use and are not available on all CPUs, so there is ongoing interest in software-only solutions that can improve confidentiality. The [guest-first memory patch set](<https://lwn.net/ml/linux-kernel/20231027182217.3615211-1-seanjc@google.com/>), posted by Sean Christopherson and containing work by several developers, looks poised to bring some software-based protection to an upcoming kernel release. 
+
+Protecting memory from the host in the absence of encryption tends to rely on address-space isolation — arranging things so that the host has no path by which to access a guest's memory. The protection in this case is less complete — an overtly hostile host kernel can undo it — but it can be effective against many host-side exploits. Back in 2020, the [KVM protected memory work](<https://lwn.net/Articles/835342/>) created a new hypercall with which a guest could request that the host unmap a range of memory in use by that guest; that would render the host system (at both the kernel and user-space levels) unable to access that memory. That work ran into a number of problems, though, and never found its way into the mainline. 
+
+The guest-first-memory work takes a similar approach, but it moves the control to the host and reduces the available protection. Specifically, it adds a new KVM `ioctl()` command, called `KVM_CREATE_GUEST_MEMFD`, that takes a size in bytes as a parameter and returns a new file descriptor. The operation is similar to [`memfd_create()`](<https://man7.org/linux/man-pages/man2/memfd_create.2.html>), in that the returned descriptor refers to an anonymous file, with the requested size, that lives entirely in memory. The differences are that this memfd is tied to the virtual machine for which it was created, and it cannot be mapped into user space on the host (or into any other virtual machine). This memory _can_ be mapped into the guest's "physical" address space, though, with a variant on the usual KVM memory-management operations. 
+
+With this operation, the hypervisor can allocate memory resources for a guest without being able to access that memory itself. That protects the guest from having its memory contents disclosed or modified, either by accident or by malicious behavior on the part of a (possibly compromised) hypervisor. Unlike some previous attempts (including KVM protected memory), this operation does not take the affected memory out of the host kernel's direct memory map. Thus, while a guest using this memory is protected from user-space threats on the host, it could still be attacked by a compromised kernel. The bar to a successful attack has been raised significantly, but the protection is not total. 
+
+There are a number of advantages to using guest-first memory, according to the patch description. Currently, KVM does not allow guests to have a higher level of access to memory than the hypervisor does; if memory is to be mapped writable in the guest, it must be both mapped and writable in the hypervisor as well, even if the hypervisor has no need to be able to write that memory. Guest-first memory, by dispensing with the hypervisor mapping entirely, clearly gets around that problem. 
+
+Guest-first memory can also be useful in the presence of hardware-based memory encryption. Encrypted memory is already protected from access by the hypervisor; should the hypervisor attempt to do so anyway, the CPU will generate a trap, which is likely to lead to the hypervisor's demise. If that memory is not mapped into the hypervisor to begin with, though, it cannot be touched by accident. Unmappable memory can also be useful for the development and debugging of hypervisors meant to work with hardware-based confidential-computing features, even on hardware lacking those features. 
+
+Longer term, this feature may also be useful for the management of dedicated memory pools; a guest memfd could be set up on the pool without the need for access from the host. It could, perhaps, allow memory for guest systems to be managed (on the host) without using `struct page` at all, reducing overhead on the host and increasing the isolation of that memory. Also with an eye on the longer term, this patch series creates a more general concept of a "protected virtual machine" that is intended to be a container for confidential-computing mechanisms within KVM. 
+
+Meanwhile, though, guest-first memory has the downside that it [cannot be migrated](<https://lwn.net/ml/linux-kernel/20231027182217.3615211-15-seanjc@google.com/>), meaning that host-side memory-management processes (such as compaction) will have to work around it. This limitation was seen as a significant problem when KVM protected memory was under discussion, but it has not been addressed in this series and will not be ""at least not in the foreseeable future"". 
+
+Even so, Paolo Bonzini (the KVM maintainer) has [let it be known](<https://lwn.net/ml/linux-kernel/80471c15-a37e-4129-8101-d30b8f73cb9f@redhat.com/>) that he plans to apply this series after the 6.7 merge window with the idea of getting it into linux-next and, later, pushing it upstream for the 6.8 kernel release. He also said that he intends to apply the series to a future RHEL kernel, meaning that guest-only memory will show up in an RHEL release at some point in the (presumably not too distant) future. That is still unlikely to happen, though, before guest-only memory has landed in the mainline and the API has settled down. 
+
+Some settling may be required; this is a 35-part patch series adding nearly 3,000 lines of code, so it would not be surprising if, even after 13 revisions, there were some adjustments needed. Still, it looks like progress is being made on a multi-year effort to increase the amount of address-space isolation afforded to guest systems. With luck, users of shared cloud systems (of whom there are a lot) will all benefit from this sort of hardening.

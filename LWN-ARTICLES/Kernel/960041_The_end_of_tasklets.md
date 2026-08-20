@@ -1,0 +1,39 @@
+---
+title: The end of tasklets
+url: https://lwn.net/Articles/960041/
+date: "February 5, 2024"
+category: "Releases-6.9; Tasklets; Workqueues"
+author: "By Jonathan Corbet February 5, 2024"
+---
+
+By **Jonathan Corbet**  
+February 5, 2024
+
+A common problem in kernel development is controlling _when_ a specific task should be done. Kernel code often executes in contexts where some actions (sleeping, for example, or calling into filesystems) are not possible. Other actions, while possible, may prevent the kernel from taking care of a more important task in a timely manner. The kernel community has developed a number of deferred-execution mechanisms designed to ensure that every task is handled at the right time. One of those mechanisms, tasklets, has been eyed for removal for years; that removal might just happen in the near future. 
+
+One context where deferred execution is often needed is interrupt handlers. An interrupt diverts a CPU from whatever it was doing at the time and must be handled as quickly as possible; sleeping in an interrupt handler is not even remotely an option. So interrupt handlers typically just make a note of what needs to be done, then arrange for the actual work to be done in a more forgiving context. There are several options for this deferral: 
+
+  * Threaded interrupt handlers. This mechanism, which originated in the realtime tree, was merged into the 2.6.30 release in 2009; it causes the bulk of a driver's interrupt handler to be run in a separate kernel thread. Threaded handlers, since they are running in process context, are allowed to sleep; the system administrator can also adjust their priority if need be. 
+  * [Workqueues](<https://docs.kernel.org/core-api/workqueue.html>) were first [added](<https://lwn.net/Articles/23634/>) during the 2.5 development series and have been extensively enhanced since then. A driver can create a work item, containing a function pointer and some data, and submit it to a workqueue. At some future time, that function will be called with the provided data; again, this call will happen in process context. There are various types of workqueues with different performance characteristics, and subsystems can create their own private workqueues if need be. 
+  * Software interrupts (or "bottom halves"). This mechanism is among the oldest in the kernel; it takes its inspiration from earlier Unix systems. A software interrupt is a dedicated handler that runs, usually immediately after completion of a hardware interrupt or before a return to user space, in atomic context. There has been a desire to remove this mechanism for years, since it can create surprising latencies in the kernel, but it persists; adding a new (direct) user of software interrupts would encounter significant opposition. See [this article](<https://lwn.net/Articles/779738/>) for more information on software interrupts. 
+  * Tasklets. Like workqueues, tasklets are a way to arrange for a function to be called at a future time. In this case, though, the tasklet function is called from a software interrupt, and it runs in atomic context. Tasklets have been around since the 2.3 development series; they, too, have been on the chopping block [for many years](<https://lwn.net/Articles/239633/>), but no such effort has succeeded to date. 
+
+Threaded interrupt handlers and workqueues are seen as the preferred mechanisms for deferred work in modern kernel code, but the other APIs have proved hard to phase out. Tasklets, in particular, remain because they offer lower latency than workqueues which, since they must go through the CPU scheduler, can take longer to execute a deferred-work item. 
+
+> **`$ sudo subscribe today`**
+> 
+> Subscribe today and elevate your LWN privileges. You’ll have access to all of LWN’s high-quality articles as soon as they’re published, and help support LWN in the process. [Act now](<https://lwn.net/Promo/nst-sudo/claim>) and you can start with a free trial subscription. 
+
+Mikulas Patocka recently [encountered a problem](<https://lwn.net/ml/linux-kernel/82b964f0-c2c8-a2c6-5b1f-f3145dc2c8e5@redhat.com/>) with the tasklet API. A tasklet is defined by [`struct tasklet_struct`](<https://elixir.bootlin.com/linux/v6.7.2/source/include/linux/interrupt.h#L619>), which contains the address of the callback function and related information. The tasklet subsystem needs to be able to manipulate that structure, and may do so after the tasklet function has completed its execution and returned. This can be a problem if the tasklet function itself wants to free that structure, as might happen for a one-shot tasklet that will not be called again. The tasklet subsystem could end up writing to a structure that has been freed and allocated for another use, with predictably unpleasant consequences. 
+
+Patocka sought to fix this problem by adding a new "one-shot" tasklet variant, where the tasklet subsystem would promise to not touch the `tasklet_struct` structure after the tasklet itself runs. Linus Torvalds, though, [did not like that patch](<https://lwn.net/ml/linux-kernel/CAHk-=wjDW53w4-YcSmgKC5RruiRLHmJ1sXeYdp_ZgVoBw=5byA@mail.gmail.com/>); he said that tasklets just should not be used in that way. Workqueues are better designed, he said, and are better for that use case — except for the extra latency they can impose. So, he suggested, the right approach might be a new type of workqueue: 
+
+> I think if we introduced a workqueue that worked more like a tasklet - in that it's run in softirq context - but doesn't have the interface mistakes of tasklets, a number of existing workqueue users might decide that that is exactly what they want. 
+
+Tejun Heo, the workqueue maintainer, ran with that idea; the result was [this patch series](<https://lwn.net/ml/linux-kernel/20240130091300.2968534-1-tj@kernel.org/>) adding a new workqueue type, `WQ_BH`, with the semantics that Torvalds described. A work item submitted to a `WQ_BH` workqueue will be run quickly, in atomic context, on the same CPU. 
+
+Interestingly, these work items are run out of a tasklet — for now. Fearing priority-inversion problems between `WQ_BH` work items and existing tasklets, Heo chose to leave the tasklet subsystem in control. The patch series converts a number of tasklet users over to the new workqueue type, though, and the plan is clearly to convert the rest over time. That may take a while; there are well over 500 tasklet users in the kernel. Once that conversion is complete, though, it will be possible to run `WQ_BH` workqueues directly from a software interrupt and remove the tasklet API entirely. 
+
+This implementation, of course, still leaves software interrupts in place; removing that subsystem will be a job for another day. Using software interrupts led to [a complaint](<https://lwn.net/ml/linux-kernel/20240130102011.rX9Qjnp1@linutronix.de/>) from Sebastian Andrzej Siewior, who would rather see tasklet users moved to threaded interrupt handlers or regular workqueues. But, as Heo [answered](<https://lwn.net/ml/linux-kernel/ZbkayGEYJNJx3ohw@slm.duckdns.org/>), that doesn't help the cases where the shortest latency is required. It seems there may always be a place for a deferred-work mechanism that does not require scheduling, as much as the realtime developers would like to avoid it. 
+
+Heo has the patch series [marked](<https://lwn.net/ml/linux-kernel/ZcACvVz83QFuSLR6@slm.duckdns.org/>) as targeted at the 6.9 kernel release, meaning that it would need to be ready for the merge window in mid-March. That is relatively quick for a significant new feature like this, but it is using a well-established kernel API to edge out a subsystem that developers have wanted to get rid of for years. So there a is a reasonable chance that this particular work may not be deferred past the next kernel cycle.

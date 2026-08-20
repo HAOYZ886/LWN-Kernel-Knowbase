@@ -1,0 +1,30 @@
+---
+title: Tbench troubles II
+url: https://lwn.net/Articles/307746/
+date: "November 19, 2008"
+category: "Scheduler-Testing and benchmarking"
+author: "By Jonathan Corbet November 19, 2008"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jonathan Corbet**  
+November 19, 2008
+
+LWN has previously [covered](<http://lwn.net/Articles/304845/>) concerns over slowly deteriorating performance by current Linux systems on the network- and scheduler-heavy tbench benchmark. Tbench runs have been getting worse since roughly 2.6.22. At the end of the last episode, attention had been directed toward the CFS scheduler as the presumptive culprit. That article concluded with the suggestion that, now that attention had been focused on the scheduler's role in the tbench performance regression, fixes would be relatively quick in coming. One month later, it would appear that those fixes have indeed come, and that developers looking for better tbench results will need to cast their gaze beyond the scheduler. 
+
+The discussion resumed after a routine weekly posting of the post-2.6.26 regression list; [one entry in that list](<https://lwn.net/Articles/307747/>) is the tbench performance issue. Ingo Molnar [responded](<https://lwn.net/Articles/307748/>) to that posting with a pointer to [an extensive set of benchmark runs](<http://fixunix.com/kernel/556867-regression-benchmark-throughput-loss-a622cf6-f7160c7-pull.html>) done by Mike Galbraith. The conclusion Ingo draws from all those runs is that the CFS scheduler is now faster than the old O(1) scheduler, and that ""all scheduler components of this regression have been eliminated."" Beyond that: 
+
+In fact his numbers show that scheduler speedups since 2.6.22 have offset and hidden most other sources of tbench regression. (i.e. the scheduler portion got 5% faster, hence it was able to offset a slowdown of 5% in other areas of the kernel that tbench triggers) 
+
+This improvement is not something that just happened; it is the result of a focused effort on the part of the scheduler developers. Quite a few changes have been merged; they all seem like small tweaks, but, together, they add up to substantial improvements in scheduler performance. [One change](<http://git.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=7cbaef9c83e58bbd4bdd534b09052b6c5ec457d5>) fixes a spot where the scheduler code disabled interrupts needlessly. Some others ([here](<http://git.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=02479099c286894644f8e96c6bbb535ab64662fd>) and [here](<http://git.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=4793241be408b3926ee00c704d7da3b3faf3a05f>)) adjust the scheduler's "wakeup buddy" mechanism, a feature which ties processes together in the scheduler's view. As an example, consider a process which wakes up a second process, then runs out of its allocated time on the CPU. The wakeup buddy system will cause the scheduler to bias its selection mechanism to favor the just-waked process, on the theory that said process will be consuming cache-warm data created by the waking process. By allowing cooperating processes like this to run slightly ahead of what a strictly fair scheduling algorithm would provide, the scheduler gets better performance out of the system as a whole. 
+
+The recent changes add a "backward buddy" concept. If there is no recently-waked process to switch to, the scheduler will, instead, bias the selection toward the process which was preempted to enable the outgoing process to run. Chances are relatively good that the preempted process might (1) be cooperating with the outgoing process or (2) have some data still in cache - or both. So running that process next is likely to yield better performance overall. 
+
+A number of other small changes have been merged, to the point that the scheduler developers think that the tbench regressions are no longer their problem. Networking maintainer David Miller has [disagreed](<https://lwn.net/Articles/307750/>) with this assessment, though, claiming that performance problems still exist in the scheduler. Ingo responded in a couple of ways, starting with the posting of [some profiling results](<https://lwn.net/Articles/307751/>) which show very little scheduler overhead. Interestingly, it turns out that the networking developers get different results from their profiling runs than the scheduler developers do. And that, in turn, is a result of the different hardware that they are using for their work. Ingo has a bleeding-edge Intel processor to play with; the networking folks have processors which are not quite so new. David Miller tends to run on SPARC processors, which may be adding unique problems of their own. 
+
+The other thing Ingo did was, for all practical purposes, to profile the entire kernel code path involved in a tbench run, then to disassemble the executable and examine the profile results on a per-instruction basis. The postings that resulted ([example](<https://lwn.net/Articles/307752/>)) point out a number of potential problem spots, most of which are in the networking code. Some of those have already been fixed, while others are being disputed. It is, in the end, a large amount of raw data which is likely to inspire discussion for a while. 
+
+To an outsider, this whole affair can have the look of an ongoing finger-pointing exercise. And, perhaps, that's what it is. But it's highly-technical finger-pointing which has increased the understanding of how the kernel responds to a specific type of stress while also demonstrating the limits of some of our measurement tools and the performance differences exhibited by various types of hardware. The end result will be a faster, more tightly-tuned kernel - and better tbench numbers too.

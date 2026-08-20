@@ -1,0 +1,54 @@
+---
+title: A report from the documentation maintainer
+url: https://lwn.net/Articles/704613/
+date: "October 26, 2016"
+category: Documentation
+author: "By Jonathan Corbet October 26, 2016"
+---
+
+> **LWN.net needs you!**
+> 
+> Without subscribers, LWN would simply not exist. Please consider [signing up for a subscription](<https://lwn.net/Promo/nst-nag2/subscribe>) and helping to keep LWN publishing. 
+
+By **Jonathan Corbet**  
+October 26, 2016
+
+It is now nearly exactly two years since my ill-advised decision to accept the role of the maintainer of the kernel's documentation collection. After a bit of a slow start, things have started to happen in the documentation area. As part of the preparation exercise for an upcoming Kernel Summit session on documentation, here is a report on where things stand and where they are going. 
+
+The biggest overall change, of course, is the transition away from a homebrew DocBook-based toolchain to a formatted documentation setup based on the [Sphinx](<http://sphinx-doc.org/>) system, as was described in [this article](<https://lwn.net/Articles/692704/>) last July. The transition made some waves when it hit; in the [4.8-rc1](<https://lwn.net/Articles/696633/>) announcement, Linus noted that a full 20% of the patch set was documentation updates. It is fair to say that kernel developers do not ordinarily put that much effort into documentation. Much of the credit for this work goes to Daniel Vetter and Mauro Carvalho Chehab, who worked hard to transition the GPU and media subsystem documentation, respectively, along with Jani Nikula and Markus Heiser, who made the Sphinx-based plumbing work. 
+
+Perhaps unsurprisingly, there have been places where Sphinx has not worked out quite as well as desired. Perhaps the biggest initial disappointment was PDF output. The original plan was to use [rst2pdf](<https://github.com/rst2pdf/rst2pdf>), a relatively simple tool that offered the possibility of creating PDF files without a heavy toolchain. It does indeed create pretty output for simple input files, but it falls over completely with more complex documents; after a while, it became clear that it was not going to meet the kernel community's needs. 
+
+That means falling back to LaTeX in 4.9; LaTeX works, but is not without its drawbacks. LaTeX is _not_ a small system; the basic install on my openSUSE Tumbleweed system was over 1,700 packages. The base Fedora installation is much smaller, but that is not necessarily better. There, getting the documentation built requires executing a seemingly endless loop of "which `.sty` file is missing now, and which package provides it?" work. Part of the idea behind switching to Sphinx was to make setting up the toolchain easier; that goal has still been met for those who are happy with HTML or EPUB output, but remains elusive for PDF output. 
+
+#### After 4.8
+
+The 4.7 kernel contains 34 "template" files that are processed by the DocBook-based toolchain; that number is down to 30 in the 4.9-rc kernels. The conversion of the remaining template files continues; eventually they will all be done and the DocBook dependency can be removed. The conversion is generally easy to do (there is a script included in the kernel source that helps), but making it all look nice can take a little longer. And updating some of the kernel's ancient documentation to match current reality may take longer yet. 
+
+A few dozen template files are one thing, but what about the various plain-text files scattered around the documentation directory? There are over 2,000 of these (not counting the device-tree files), some rather more helpful than others. Very little organizational thought has been applied to this directory. As former documentation maintainer Rob Landley [put it](<https://lkml.org/lkml/2007/7/3/422>) in 2007, ""Documentation/* is a gigantic mess, currently organized based on where random passers-by put things down last"". It has improved little since then. 
+
+Now we are trying to improve it by applying some structure to the directory and by bringing the plain-text files into the growing body of Sphinx-based documentation. The latter task is easy — most of the plain-text files are almost in the reStructuredText format used by Sphinx already, so only minor tweaks are required. The organizational task is harder. 
+
+The 4.9 kernel will contain a couple of new sub-manuals in the Sphinx-based documentation. One of them, called [`dev-tools`](<http://static.lwn.net/kerneldoc/dev-tools/tools.html>), is a collection of the plain-text documents about tools that can be used in kernel development. The other, [`driver-api`](<http://static.lwn.net/kerneldoc/driver-api/index.html>), gathers information of interest to device-driver developers. Both of these books are works in progress, they exist in their current form mostly to show the way forward. 
+
+In 4.10, the chances are good that three more major sub-manuals will put in an appearance. One of them, tentatively called `core-api`, will be a collecting point for documentation about the core-kernel interfaces. That information is currently widely distributed among plain-text files and kerneldoc comments within the source itself; it will be good to have it together in one place — sometime well in the future, when the process of creating this manual has run its course. 
+
+Next, [the `process` book](<http://static.lwn.net/kerneldoc/process/index.html>) will hold our (fairly extensive) documentation on how to work with the kernel development community. It includes the often-cited [`SubmittingPatches`](<https://www.kernel.org/doc/Documentation/SubmittingPatches>) document (now [`process/submitting-patches.rst`](<http://static.lwn.net/kerneldoc/process/submitting-patches.html>)), along with information on coding style, email client configuration, and more. This work (done by Mauro) was ready in time for 4.9, but I put the brakes on it out of fear that moving files like `SubmittingPatches` would leave a lot of dangling links in the brains of the development community. Various discussions over the past month have failed to turn up even a single developer who was unhappy about it, though, so the current plan is for this work to proceed for 4.10. 
+
+The last proposed book recognizes that there are multiple audiences for the kernel's documentation; it will (probably) be called [`admin-guide`](<http://static.lwn.net/kerneldoc/admin-guide/index.html>) and will be aimed at system administrators, users, and others who are trying to figure out how to get the kernel to do what they want. Much of our documentation covers module parameters, tuning knobs, and user-space APIs; collecting and organizing it should make it more accessible for our users. 
+
+#### Open issues
+
+As this work proceeds, a number of issues have come up that are still in need of resolution; many of them come down to a tradeoff between simplicity and functionality. On the simplicity side, it is desirable to keep the documentation toolchain as simple and easy to set up as possible so that anybody can build the docs. On the other hand, making use of more functionality (and thus adding to the toolchain's dependencies) enables the creation of more expressive documentation. 
+
+One such issue is the use of the Sphinx [math extension](<http://www.sphinx-doc.org/en/1.4.8/ext/math.html>), which supports the formatting of mathematical expressions using the LaTeX syntax. As of 4.9, the media documentation is using this extension, but there is a cost: it forces the use of LaTeX even to build the HTML documentation. The hope is to find an easy way to fall back gracefully when LaTeX is unavailable in order to soften this dependency. 
+
+A deeper question has to do with the automatic generation of reStructuredText documentation from other files in the kernel tree. That is already done with the in-source kerneldoc comments, of course, but there is interest in pulling in a number of other types of information as well. That extends as far as reformatting the `MAINTAINERS` file as part of the documentation build process. There are patches circulating to allow, to a varying extent, the running of arbitrary programs during the documentation build to do this generation; these patches run into concerns about security and maintainability. The form of the solution to this problem is not yet entirely clear. 
+
+Interestingly, there is significant disagreement over the removal of ancient, obsolete documentation. Do we really need, say, [documentation from 1996](<http://static.lwn.net/kerneldoc/admin-guide/bug-hunting.html>) describing how to manually bisect bugs in the 1.3.x kernel? Resistance to removing such cruft usually comes in the form of "but it might be useful to somebody someday." But we do not retain unused code on that basis; we recognize that there is a cost to carrying such code in the kernel. There is, likewise, a cost to carrying old, obsolete documentation, paid by both the documentation maintainers and the users the documentation is meant to help. In my opinion, some spring cleaning is in order, even if spring is a distant prospect in the northern hemisphere. 
+
+One other possibly contentious change has been suggested by a few people now. `Documentation/` is a long name, and is the only top-level directory in the kernel starting with a capital letter. One can joke that this distinction highlights the importance of documentation, but it's also a lot for people to type. So I've been asked a few times if it could be renamed to something like "`docs`". That, I think, is a question for the Kernel Summit. 
+
+Finally, it should be said that much of the above consists of a rearrangement of a bunch of kernel documentation that is of varying quality and is not all current. It makes the documentation prettier and, hopefully, easier to find, but does not yet turn it into a coherent body of accessible and useful material. There is a good case for doing the organizational work first, as long as we don't forget that there is a lot more to be done. 
+
+Despite the disagreements over how to proceed in some of these areas, and despite the magnitude of the task, there is a broad consensus that the time has come to improve the kernel's documentation. More effort is going into this part of the kernel than has been seen for some years. With any luck, kernel developers, distributors, and users will all be the beneficiaries of this work. For anybody who is looking for a way to help with kernel development, there are plenty of opportunities in the documentation area; we would be happy to hear from you. The [linux-doc list at vger.kernel.org](<http://vger.kernel.org/vger-lists.html#linux-doc>) is a relatively calm place to work on documentation without subjecting oneself to the linux-kernel firehose. We look forward to your patches.

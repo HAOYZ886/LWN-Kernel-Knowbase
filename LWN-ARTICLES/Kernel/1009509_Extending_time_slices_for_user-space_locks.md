@@ -1,0 +1,54 @@
+---
+title: "Extending time slices for user-space locks"
+url: https://lwn.net/Articles/1009509/
+date: "February 19, 2025"
+category: "Scheduler-Time-slice extension"
+author: "By Daroc Alden February 19, 2025"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Daroc Alden**  
+February 19, 2025
+
+Steven Rostedt recently posted [ a patch set](<https://lwn.net/ml/all/20250131225837.972218232@goodmis.org/>) that could help improve the performance of certain user-space applications by giving the scheduler more context about when they are safe to interrupt. The patch set lets programs request a small grace window before they can be interrupted so that they can relinquish any locks, decreasing the amount of time that other threads have to spend waiting. Rostedt shared performance numbers suggesting that the patch might cut the amount of time spent acquiring locks in half for some programs — although, since his test was specifically tuned for this case, real-world projects should expect a somewhat less dramatic improvement. The change received some pushback from scheduler maintainer Peter Zijlstra, who objected to the patch set's approach. 
+
+#### Background
+
+The core job of the scheduler is to decide which task ought to be running on each CPU at a given time. In order to carry out its decision, it will preempt running tasks at different points — when a task has been running for its allotted time slice, when a hardware interrupt arrives, when a higher-priority task needs to run, etc. When a task is running in user space, preempting it is relatively straightforward. But preempting kernel code requires a bit more cooperation. 
+
+The Linux kernel has several different levels of preemption that users can select, from `PREEMPT_FULL`, which can interrupt kernel code at (almost) any point all of the way to `PREEMPT_NONE`, which never interrupts kernel code except at explicit preemption points. In 2024, the kernel gained [ a new level](<https://lwn.net/Articles/994322/>), `PREEMPT_LAZY`. This setting makes it so that when an event might normally cause another thread to preempt the running thread, it can instead just set a flag. When the running thread returns to user space, or when the next scheduler tick occurs, the kernel looks at that flag to decide whether to reschedule the running thread. 
+
+There are complications, of course. Scheduler ticks, hardware interrupts, and realtime threads all impact preemption in slightly different ways. LWN has [covered](<https://lwn.net/Articles/831678/>) the [details](<https://lwn.net/Articles/944686/>) for [years](<https://lwn.net/Articles/945422/>). But broadly, `PREEMPT_LAZY` combines the best performance characteristics of `PREEMPT_FULL` and `PREEMPT_NONE` — the running thread _can_ be preempted at almost any time (allowing for low-latency realtime processes), but it mostly won't be. In the typical case, the thread will finish whatever its current task is, and only be preempted on return to user space or when its time slice ends, which is better for performance. 
+
+In particular, lazy preemption lets the kernel defer preemptions until a task would need to make a context switch anyway, avoiding unnecessary switches and therefore improving performance. The decision about whether to let a task keep running can only be made with information that the kernel has, however. If a thread uses a purely user-space lock, such as a spinlock, then preempting it could require other threads to waste time waiting for the thread to be scheduled again. 
+
+So Rostedt's patch set gives user-space programs a way to signal the kernel when they are in a critical section; it adds a field to [ the structure](<https://elixir.bootlin.com/linux/v6.14-rc2/source/include/uapi/linux/rseq.h#L62>) used for [ restartable sequences](<https://lwn.net/Articles/650333/>) that the kernel will check when it preempts the program. This structure is mapped into both kernel memory and the memory of the user-space program, so keeping the kernel up to date doesn't impose the overhead of a system call. If the program indicates that it's in a critical section and a preemption event occurs, the kernel will check whether the reason for the preemption is something that can be slightly delayed (according to the flag for `PREEMPT_LAZY`). If so, the scheduler will wait a short time so that the program can give up its locks. 
+
+The kernel also uses the same shared memory to tell the user-space process that it has received a grace period, and it should make a system call (any system call) once it's out of the critical section to let the kernel schedule the next task. If an uncooperative user-space program doesn't do that, the scheduler will just preempt the program normally after 50µs. In exchange for that short delay, the patch set significantly reduces the amount of time that threads on other CPUs spend waiting for user-space locks. While the exact speedup will depend on the application, Rostedt did share some performance numbers where the amount of time spent waiting on a lock was cut in half. 
+
+In his justification for the patch, Rostedt was clear that this is not intended to enable any new abilities that user-space programs did not already have; it's a pure performance optimization for low-level user-space locks. The kernel is not required to honor a process's request for more time. The information is only treated as a hint to allow it to schedule tasks more efficiently. 
+
+#### The discussion
+
+Zijlstra [ did not like](<https://lwn.net/ml/all/20250201115906.GB8256@noisy.programming.kicks-ass.net/>) the patch set, saying ""I still have full hate for this approach."" Despite that discouraging opening, Rostedt [ asked](<https://lwn.net/ml/all/F30E23B6-7452-46F9-BF53-48799AE02F75@goodmis.org/>) how he would like the idea to be implemented, prompting Zijlstra to [ elaborate](<https://lwn.net/ml/all/20250201181129.GA34937@noisy.programming.kicks-ass.net/>). He would prefer an implementation that works with all preemption modes, not just `PREEMPT_LAZY`. 
+
+If this feature were implemented for all preemption modes, then that could lead to a situation where an event causes a task to be rescheduled in the kernel, but the same event wouldn't cause a user-space task to be rescheduled, Rostedt [ said](<https://lwn.net/ml/all/20250201180617.491ce087@batman.local.home/>). Although he didn't say it explicitly, the implication was that such a state of affairs wouldn't really make sense. He also explained that his ultimate goal was to apply this performance enhancement to virtual machines. 
+
+Zijlstra [ responded](<https://lwn.net/ml/all/20250203084306.GC505@noisy.programming.kicks-ass.net/>) with a list of complaints, first among them that `PREEMPT_LAZY` is neither the default nor even a recommended preemption method right now. And even if it eventually became the default, there would always be `PREEMPT_FULL` as an option. So any approach that was based on the chosen preemption mode would not apply to most workloads, he said. 
+
+Rostedt [ didn't see the problem](<https://lwn.net/ml/all/20250203114537.6a30c7c0@gandalf.local.home/>), saying that it was okay if most programs had to wait for `PREEMPT_LAZY` to become the default in order to benefit from this. Furthermore, users who enable `PREEMPT_FULL` are trying to minimize latency — and therefore would likely not want this feature in any case. 
+
+Suleiman Souhlal [ asked](<https://lwn.net/ml/all/CABCjUKA2w9Xip2QDjMRDCWnvmZc52SWbn74-57q52gmpXcT+EA@mail.gmail.com/>) why `PREEMPT_LAZY` was needed for Rostedt's patch set at all; Rostedt [ explained](<https://lwn.net/ml/all/20250203225719.3152a78f@gandalf.local.home/>) that the code needed some way to distinguish between preemption events where a little extra delay was tolerable (such as reaching the end of a time slice) versus preemption for a realtime thread. ""We should not delay any RT tasks ever"", he said. Much later in the discussion, he even [ shared](<https://lwn.net/ml/all/20250205083857.3cc06aa7@gandalf.local.home/>) an idea for how his patch set could potentially be extended to other preemption modes in the future by changing the flags the kernel sets for different events. 
+
+The idea that realtime threads should not be delayed proved to be another point of contention with Zijlstra, however, who didn't see the problem with adding a small, bounded delay to realtime tasks. He [ explained](<https://lwn.net/ml/all/20250204153053.GX7145@noisy.programming.kicks-ass.net/>) that there were already places in the kernel that could hold a lock for 50µs, and didn't think that adding one more in user space would cause problems: 
+
+> There is no difference between a 'malicious/broken' userspace consuming the entire window in userspace (50us, 20us whatever it will be) and doing a system call which we know will cause similar delays because it does in-kernel locking. 
+
+Rostedt [ remained adamant](<https://lwn.net/ml/all/20250204111119.10ee37c8@gandalf.local.home/>) that adding any extra delay onto realtime tasks was simply not acceptable, and refused to change the patch set in that way. The two of them exchanged several more emails on the topic, but were unable to reach an agreement. Rostedt also got into [ an extended exchange](<https://lwn.net/ml/all/CAEXW_YQxTi2y_hY_e4AjLSa6RwVVLn3DPj5d4Cfewq0js-0UTA@mail.gmail.com/>) with Joel Fernandes on the same topic. 
+
+This wasn't the first time that the idea of allowing user space to provide more information to the scheduler about locking has been raised. One of Zijlstra's complaints was that he preferred the approach that Prakash Sangappa [ shared](<https://lwn.net/ml/all/20241113000126.967713-1-prakash.sangappa@oracle.com/>) a few months earlier — although he had plenty of disagreements with how that patch set was implemented as well. It had a similar ultimate effect, but implemented the communication between the kernel and user space with a new shared memory mapping and integrated with the scheduling code a bit differently. 
+
+While it seems that Zijlstra is in favor of the general idea of a mechanism to better schedule threads using user-space locks, he doesn't think any of the patches on the topic so far are how it should be done. On the other hand, he didn't explicitly refuse either patch set, so Rostedt and Sangappa will probably continue working on their respective patch sets. In time, such a change could provide a significant performance benefit to virtual machines, green-threading libraries, and other user-space programs that make use of spinlocks. If Zijlstra gets his way, the change may even benefit kernels with preemption modes other than `PREEMPT_LAZY`.

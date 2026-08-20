@@ -1,0 +1,40 @@
+---
+title: Memory protection keys pushback
+url: https://lwn.net/Articles/695355/
+date: "July 27, 2016"
+category: Memory protection keys
+author: "By Jonathan Corbet July 27, 2016"
+---
+
+> **We're bad at marketing**
+> 
+> We can admit it, marketing is not our strong suit. Our strength is writing the kind of articles that developers, administrators, and free-software supporters depend on to know what is going on in the Linux world. Please [subscribe today](<https://lwn.net/Promo/nsn-bad/subscribe>) to help us keep doing that, and so we don’t have to get good at marketing. 
+
+By **Jonathan Corbet**  
+July 27, 2016
+
+"Memory protection keys" (MPK) are an Intel processor feature that allows a process to divide its address space into regions and apply additional access restrictions to each region. Support for this feature has been under discussion for over a year; when [the proposed system calls](<https://lwn.net/Articles/689395/>) were posted for final review, there did not seem to be any further impediments to merging them for the 4.8 kernel. Some last-minute objections have changed that picture, though, demonstrating just how hard it can be to get new APIs right. 
+
+Though support for this feature has been widely discussed, the kernel's memory-management developers have, for the most part, not participated in that discussion. That changed in early July when Mel Gorman took a look and didn't entirely like everything that he saw. 
+
+One interesting aspect of the MPK feature at the hardware level is that it is almost entirely available to unprivileged processes. User space can allocate the keys (which are just small integer values) and change the restrictions associated with each key without help from the kernel. The only action that does require kernel intervention is associating key values with pages in the page-table entries; the `pkey_mprotect()` system call exists in the patch set for that purpose. Even though they are not strictly necessary, the MPK patches have defined system calls for key allocation (`pkey_alloc()` and `pkey_free()`) for manipulating the associated access restrictions (`pkey_get()` and `pkey_set()`). 
+
+One of Mel's first [comments](<https://lwn.net/Articles/695470/>) was that these system calls are better implemented in user space. There is nothing that requires the kernel to be involved, and bringing in the kernel adds overhead to the MPK functionality. While there is sympathy for that view, there also seem to be good reasons for implementing this functionality in the kernel. Nothing else can ensure that the allocation interface is used (avoiding clashes between different parts of the same program), and the kernel has to track the access restrictions anyway so that they can be properly saved and restored on context switches. 
+
+Part of Mel's objection is that the system calls for manipulating protection keys acquire the `mmap_sem` semaphore. This semaphore, which lives in the process's `mm_struct` structure, is one of the most heavily contended locks in the system. It is required for many other memory-management tasks, such as `mmap()` calls and the handling of page faults. Acquisition of `mmap_sem` is unavoidable for `pkey_mprotect()`, since it must manipulate the process's page tables, but it is less clear that it should be needed for the other system calls. 
+
+There would appear to be a couple of reasons behind the use of `mmap_sem`. One is to avoid races between `pkey_mprotect()` and the other system calls; it would be less than ideal to be applying a particular key to a process's pages while another thread is deallocating that key entirely. But the consensus seems to be that this kind of race cannot be entirely defended against and, if an application wants to defeat itself in this manner, there is little to be done. Another reason for the use of `mmap_sem` has to do with how the system calls are implemented; more on that shortly. 
+
+Regardless of the reasons for its use, though, it is clear that taking `mmap_sem` in the MPK system calls will increase contention for an already-busy semaphore and slow down many memory-management functions. Thus, Mel said: ""Right now, I'm seeing a lot of cost and not much benefit with this specific patch."" 
+
+The performance issue matters because, in the end, MPK is a performance feature. Almost anything that can be done with MPK can also be done with direct `mprotect()` calls on ranges of pages, but MPK can be vastly faster — contrast changing a single access-control register with iterating through a range of page-table entries and changing the protections on each one. If the kernel's MPK implementation slows things down, it defeats the purpose of using the feature in the first place. And given that the application does not _have_ to use most of the kernel's system calls, developers are free to circumvent the kernel if they don't want to pay the performance cost. 
+
+Ingo Molnar [expressed](<https://lwn.net/Articles/695474/>) that concern, noting that, if the kernel's implementation is slow, ""user-space might legitimately use its own implementation for performance reasons and we'd end up with twice the complexity and a largely unused piece of kernel infrastructure"". Avoiding this problem requires dropping the use of `mmap_sem` but, he fears, that is not enough. It may become necessary to create a whole new infrastructure based on [virtual system calls](<https://lwn.net/Articles/615809/>) to achieve adequate performance. Rather than do all of that optimization now, he suggested, it might be better to avoid implementing allocation and management functionality in the kernel at all until a clear need develops. 
+
+He had another concern, though, that touches on the core of how the MPK feature is envisioned. One of the reasons for protecting the kernel's MPK-related data with `mmap_sem` is that data's presence in the `mm_struct` structure. But, Molnar said, it should be a per-thread item stored in the `task_struct` structure instead. There is a significant difference between these two placements: all of the threads that make up a process share a single `mm_struct`, but each has its own `task_struct`. With the current implementation, all threads will share the same set of protection keys and, in particular, the same set of access restrictions. 
+
+The key-allocation functionality will always have to be per-process, since all threads share the same page tables and will, thus, see the same keys applied to each page. But the register containing the restrictions associated with each key must be managed by the kernel at context-switch time anyway, and thus it does not need to be the same for every thread. That leaves open the possibility of having threads running with different restrictions for the same keys. Molnar described [one use case](<https://lwn.net/Articles/695481/>) for this capability: having one writer thread that is able to change a range of shared memory, while all other threads have read-only access instead. 
+
+This notion of per-thread restrictions was not envisioned in the original design for MPK support in the kernel and, indeed, would have been precluded by the current patch set. Assuming that this mode is useful, that would have proved to be a fundamental limitation in the kernel's MPK implementation. Supporting it will require rethinking the API, though; there are interesting questions to resolve, including how to set the restrictions for all threads in a process. Needless to say, such rethinking is best done before the API is set in stone. 
+
+The performance and functionality concerns make it clear that, contrary to appearances, the MPK patch set is still not ready for merging into the mainline. Getting system-call interfaces right is never easy, and it has certainly proved not to be in this case. But, once the kernel provides an API, that API must be supported indefinitely. Delaying the MPK system-call interface is not going to make anybody happy, but it is preferable to merging the wrong interface.

@@ -1,0 +1,49 @@
+---
+title: Writing network flow dissectors in BPF
+url: https://lwn.net/Articles/764200/
+date: "September 6, 2018"
+category: "BPF-Networking; Networking"
+author: "September 6, 2018 This article was contributed by Marta Rybczyńska"
+---
+
+> **Benefits for LWN subscribers**
+> 
+> The primary benefit from [subscribing to LWN](<https://lwn.net/Promo/nst-nag5/subscribe>) is helping to keep us publishing, but, beyond that, subscribers get immediate access to all site content and access to a number of extra site features. Please sign up today! 
+
+September 6, 2018
+
+This article was contributed by Marta Rybczyńska
+
+Network packet headers contain a great deal of information, but the kernel often only needs a subset of that information to be able to perform filtering or associate any given packet with a flow. The piece of code that follows the different layers of packet encapsulation to find the important data is called a flow dissector. In current Linux kernels, the [flow dissector](<https://elixir.bootlin.com/linux/v4.18.6/source/net/core/flow_dissector.c>) is written in C. A [patch set](<https://lwn.net/Articles/763938/>) has been proposed recently to implement it in BPF with the clear goal of improving security, flexibility, and maybe even performance.
+
+#### Flow dissection in the kernel
+
+Flow dissector usage is common in high-speed networks, but it is not limited to that use case. Information from the flow dissector may be used by a firewall or a traffic filter, or in any other situation where complete packet parsing is not necessary. For example, just the source IP address or UDP port number may be enough for the kernel to decide on the action to perform on a packet. The flow dissector extracts just the values the caller has requested from the headers; those values are called "keys". The Linux implementation of the flow dissector is not the only one; Wireshark, for example, has its own version of [packet dissection](<https://www.wireshark.org/docs/wsdg_html_chunked/ChapterDissection.html>).
+
+Let us show packet dissection on an example of extracting fields from a UDP packet; in this case, it has been asked to extract two keys: the IP addresses and the UDP port numbers. The dissector starts at the Ethernet layer to check whether the packet contains an IP header directly or if there are VLANs or other encapsulations to deal with. At the IP level it will save the source and destination addresses, along with the protocol field, which determines the type of the payload protocol. Assuming that the protocol is UDP, the dissector will look for the source and destination port fields, respectively, and save their values. At that point, the requested keys have been found and the dissector's work is done. Note that the real dissector will be more complicated; it will also follow other encapsulation cases (if the UDP header does not directly follow the IP header, for example), take into account the packet fragmentation, and possibly save more keys.
+
+Linux currently includes one built-in flow dissector; the [flower classifier [PDF]](<https://www.netdevconf.org/2.2/papers/horman-tcflower-talk.pdf>) is the main user. The idea of using a flow dissector based on BPF was [raised back in 2017 [PDF]](<http://vger.kernel.org/netconf2017_files/rx_hardening_and_udp_gso.pdf>). Petar Penkov and Willem de Bruijn have recently proposed to add a flow dissector written in BPF for the receive path.
+
+#### Switching to BPF
+
+Using BPF for flow dissection adds a number of interesting security features. Certain types of vulnerabilities become impossible because BPF programs are guaranteed to terminate and thus won't go into an infinite loop. The submission mentioned [CVE-2013-4348](<https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2013-4348>) as an illustration of the type of problem that can be avoided. That vulnerability consisted of the flow dissector entering an infinite loop when using IPIP encapsulation in cases where it received a packet with a tiny header length value.
+
+Additionally, in BPF, all memory accesses are checked, so it is not possible for a program to read outside of the packet bounds. Another possible feature of the new flow dissector is allowing the administrator to disable the dissection of packets containing unused protocols, reducing the number of possible attacks. If a bug is discovered, the administrator can remove the faulty code from the dissector without a kernel recompilation or even a reboot. Or, they can add their own specialty dissector if needed.
+
+The proposed patch adds the BPF execution in `__skb_flow_dissect()`; each network namespace can have its own dissector. The submission includes an [example program](<https://lwn.net/ml/netdev/20180830182301.89435-3-peterpenkov96@gmail.com/>) to illustrate the concept. It already handles most of the protocols needed, including multiple levels of IP encapsulation, VLAN, and IPv4/v6 extension headers.
+
+The possible return values of the BPF flow dissector were the subject of a discussion. Currently the program returns `BPF_OK` (if dissection has completed successfully) or `BPF_DROP` (if the dissector came to a conclusion that it is necessary to drop the packet). Song Liu [asked](<https://lwn.net/ml/netdev/CAPhsuW5pOYdTx+w06=xW0XMPkjx62RsJ2EP5iJZCx_3QQZb=xw@mail.gmail.com/>) if there should be a separate value to allow fallback to the C implementation if the BPF program encounters a protocol it does not support. Penkov [answered](<https://lwn.net/ml/netdev/CAG4SDVVS1Akdg7hkFwkencBk_rZL5zGRYREHtAiK3+Cg=oL3pw@mail.gmail.com/>) that fallback to C would defeat the security guarantees provided by BPF. De Bruijn [explained further](<https://lwn.net/ml/netdev/CAF=yD-KciJUH6Mi_oE2rqfOPWTLvEAdinos64fL=0+dEA=_gFQ@mail.gmail.com/>) that this idea had been discussed, but they had decided against it. The goal of the BPF flow dissector is to replace the built-in version; falling back to the C dissector would make reaching this goal harder because users would quickly come to depend on this behavior.
+
+The location of the hook for the BPF program was also discussed. It would be possible to add it to the XDP (eXpress Data Path) hook instead, for example. The authors of the proposal did not go that way for multiple reasons. The first reason is that it would be more expensive -- the XDP hook executes before [GRO](<https://lwn.net/Articles/358910/>) (generic receive offload), so the dissector would run more often. The XDP hook also runs before the SKB structure to hold the packet is allocated, and there is no easy way to move the dissected keys to the SKB afterwards. It could be possible to implement both flow dissection and GRO in a single pass, but that would require much more flow state to work. 
+
+In the first version of the submission, the definitions of the [various structures](<https://elixir.bootlin.com/linux/v4.18.6/source/include/net/flow_dissector.h>) used to hold flow-dissector keys were copied into the BPF program itself, since they are otherwise not visible to user space. Alexei Starovoitov [noted](<https://lwn.net/ml/netdev/20180820205205.jj7e75pulwqkorpr@ast-mbp/>) that everything used by a BPF program becomes part of the user-space API; he suggested three solutions: moving all the key structures to the user-space headers, wrapping all of them into a separate structure and modifying the code when the internal ones change, or waiting for [BTF](<https://lwn.net/Articles/750695/>) to solve the issue. The last option was eliminated since BTF is not ready for this kind of use yet. As networking maintainer David Miller also [supported](<https://lwn.net/ml/netdev/20180820.192446.1163576988616844281.davem@davemloft.net/>) the wrapping option, this is the solution the second submission used: `struct bpf_flow_keys` contains all of the supported keys so that they are available to the BPF program.
+
+The first version of this patch set ran into an interesting problem: since the offset at which to start dissection in a packet is supplied by the caller, the BPF verifier cannot ensure that accesses using that offset will remain within bounds. So relatively slow accessors had to be used to get at packet data. Daniel Borkmann [suggested](<https://lwn.net/ml/netdev/3551c6f1-61d4-6f2d-885f-9f84131179e9@iogearbox.net/>) a simple trick to get around this issue: the BPF program need only check that the offset is in bounds at the beginning; after that, the verifier can prove that subsequent uses will remain within bounds. That change [improved the performance](<https://lwn.net/ml/netdev/CAG4SDVXU8kT_ZX17GkZb8BVBEHGRSR9vBe+jE_EavkBzjOeECQ@mail.gmail.com/>) of BPF dissectors to be comparable with the in-kernel dissector. 
+
+#### Current state
+
+A performance evaluation is included with the submission; it compares the BPF flow dissector with the in-kernel dissector and the no-op dissector on a UDP flow. The speed of the dissectors is similar, with the BPF one performing slightly better than the in-kernel dissector. More evaluations will probably follow, but the results are already encouraging.
+
+The BPF flow dissector already integrates with the flower classifier since it uses the same interface. The tests included with the patch set show this integration: the demonstration drops packets from a specified UDP source port in the scenario we covered at the beginning of the article. As flower uses the flow dissector to match flows, dropping the right ones shows the right dissection.
+
+The BPF flow dissector is another part of an increasingly BPF-based network processing model that includes XDP ([covered here](<https://lwn.net/Articles/750845/>) previously). The goal of the BPF flow dissector is ambitious: to replace the built-in one. Time will tell if it will succeed. Before that, the patch set received positive comments and it seems likely that it will be included in the near future.

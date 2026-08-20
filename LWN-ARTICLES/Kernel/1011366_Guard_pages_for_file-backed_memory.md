@@ -1,0 +1,40 @@
+---
+title: "Guard pages for file-backed memory"
+url: https://lwn.net/Articles/1011366/
+date: "March 3, 2025"
+category: "System calls-madvise"
+author: "By Jonathan Corbet March 3, 2025"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+By **Jonathan Corbet**  
+March 3, 2025
+
+One of the many new features packed into the 6.13 kernel release was guard pages, a hardening mechanism that makes it possible to inject zero-access pages into a process's address space in an efficient way. That feature only supports anonymous (user-space data) pages, though. To make guard pages more widely useful, Lorenzo Stoakes has put together [a patch set](<https://lwn.net/ml/all/cover.1739469950.git.lorenzo.stoakes@oracle.com>) enabling the feature for file-backed pages as well; in the process, he examined and resolved a long list of potential problems that extending the feature could encounter. One potential problem was not on his list, though. 
+
+The purpose of a guard page is to prevent buggy (or malicious) code from overrunning a memory region. An inaccessible page placed at the end of a region will cause a segmentation fault should the running process try to read or write to it; well-placed guard pages can trap a number of common buffer overruns and similar problems. Prior to 6.13, though, the only way to put a guard page into a process's address space was to set the protections on one or more pages with [`mprotect()`](<https://man7.org/linux/man-pages/man2/mprotect.2.html>); that works, but at the cost of creating a new virtual memory area (VMA) to contain the affected page(s). Placing a lot of guard pages will create a lot of VMAs, which can slow down many memory-management functions. 
+
+The new guard-page feature addresses this problem by working at the page-table level rather than creating a new VMA. A process can create guard pages with a call to [`madvise()`](<https://man7.org/linux/man-pages/man2/madvise.2.html>), requesting the `MADV_GUARD_INSTALL` operation. The indicated range of memory will be rendered inaccessible; any data that might have been stored there prior to the operation will be deleted. There is an operation (`MADV_GUARD_REMOVE`) to remove guard pages as well. 
+
+Placing guard pages in VMAs containing anonymous pages is the simplest case, which is why anonymous pages were supported first. These pages have no connection to any file on disk, so there are relatively few hazards involved with changing their behavior. File-backed pages bring more complexity, though, and a number of places where guard pages could cause problems. Stoakes goes through the list in detail in the patch posting. 
+
+For example, readahead is an important part of maintaining performance when a process is working sequentially through a file. As that process reads some data from a file, the kernel can guess that the process will go on to request the following data in the file in the near future. By initiating a read operation before user space gets around to asking for the data, the kernel can ensure that this data is present (or at least on its way) when the request arrives. The presence of a guard page will stop readahead cold at that point, since the page has been marked inaccessible. As Stoakes notes, this should not be a problem, since it would be unusual for a process to map a file, place a guard page, then try to read through that page. 
+
+Similar complications arise in other situations. The kernel will often try to "fault around" a page that has been faulted in, under the assumption that nearby data will be of interest; guard pages will prevent that as well. If a file is truncated, the removed portion may include guard pages, but the guard pages themselves will remain in place. And so on; in each case, Stoakes has ensured that the kernel's operation will be correct and make sense. 
+
+There are still a couple of exceptions, though, one of which was known about before the patches were posted, while the other was a surprise. The known issue is that guard pages cannot be placed in memory areas that have been locked into RAM with [`mlock()`](<https://man7.org/linux/man-pages/man2/mlock.2.html>). The problem, as Vlastimil Babka [pointed out](<https://lwn.net/ml/all/fbfae348-909b-48fa-9083-67696b02f15e@suse.cz>), is that `mlock()` guarantees that the affected pages will not be kicked out of RAM. Installing a guard page, though, frees any data stored there, which runs counter to the `mlock()` promise. Stoakes is [considering](<https://lwn.net/ml/all/8d643393-ddc0-490d-8fad-ad0b2720afb1@lucifer.local>) a new operation that would make this data destruction explicit in that case but, as David Hildenbrand [said](<https://lwn.net/ml/all/37b606be-f1ef-4abf-83ff-c1f34567568e@redhat.com>), ""mlock is weird"" and there are a number of other details that would have to be managed there. 
+
+The unexpected issue was [raised](<https://lwn.net/ml/all/CAC_TJveMB1_iAUt81D5-+z8gArbVcbfDM=djCZG_bRVaCEMRmg@mail.gmail.com>) by Kalesh Singh, who wondered how the presence of guard pages would be represented in `/proc/_PID_ /maps` and `/proc/_PID_ /smaps`. These files, which are documented in [Documentation/filesystems.proc.html](<https://docs.kernel.org/filesystems/proc.html>), describe a process's VMAs in detail. Singh said: 
+
+> In the field, I've found that many applications read the ranges from /proc/self/[s]maps to determine what they can access (usually related to obfuscation techniques). If they don't know of the guard regions it would cause them to crash; I think that we'll need similar entries to PROT_NONE (---p) for these, and generally to maintain consistency between the behavior and what is being said from /proc/*/[s]maps. 
+
+It seems that banking apps running on Android are known for this sort of behavior and could run into trouble if guard pages are installed — which is something that the Android runtime might well want to do as a general hardening measure. Since those apps already read the indicated `/proc` files, Singh thought that would be a logical place to indicate the presence of the guard pages. 
+
+This request [took Stoakes by surprise](<https://lwn.net/ml/all/45297010-a0a4-4a42-84e8-6f4764eab3b3@lucifer.local>), since he thought the topic had been discussed previously and the situation understood. That situation is that, since those files describe VMAs, they are not a suitable place to put information about guard pages which, by design, do not have their own VMAs. Hildenbrand quickly [suggested](<https://lwn.net/ml/all/41af4ffb-0383-4d00-9639-0bf16e1f5f37@redhat.com>) that a bit in `/proc/_PID_ /pagemap`, which provides page-level data now, would be the best way to export that information to user space. The conversation nonetheless became a little tense, seemingly mostly as a result of misunderstandings rather than true disagreement. 
+
+In the end, though, it was agreed that `pagemap` was the right place for this information. Suren Baghdasaryan eventually [joined the conversation](<https://lwn.net/ml/all/CAJuCfpHpchh0CzEgh5CKmRLwpscBLx32A-mGi4eudpir1wm=cQ@mail.gmail.com>), saying that some work would be needed to make this information available to apps in the Android system, but that he would start on that project. Apologies and thanks were shared around, and Stoakes [said](<https://lwn.net/ml/all/87bae232-b01d-4962-bbe1-3677b71ff752@lucifer.local>) that he would go ahead and implement the kernel side of the `pagemap` solution. 
+
+With that issue seemingly resolved, there does not appear to be any serious obstacles to this feature heading toward the mainline in the near future. The patch series (minus the `pagemap` changes) is sitting in linux-next now and could conceivably go upstream as soon as the 6.15 merge window. That should result in easier and cheaper user-space hardening, which seems worth the trouble.

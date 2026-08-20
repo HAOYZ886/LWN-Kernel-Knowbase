@@ -1,0 +1,42 @@
+---
+title: "Stray-write protection for persistent memory"
+url: https://lwn.net/Articles/883352/
+date: "February 3, 2022"
+category: "Memory protection keys; Security-Kernel hardening"
+author: "By Jonathan Corbet February 3, 2022"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+February 3, 2022
+
+Persistent memory has a number of advantages; it is fast, CPU-addressable, available in large quantities and, of course, persistent. But it also, arguably, poses a higher risk of suffering corruption as a result of bugs in the kernel. Protecting against this possibility is the objective of [this patch set](<https://lwn.net/ml/linux-kernel/20220127175505.851391-1-ira.weiny@intel.com/>) from Ira Weiny, which makes use of Intel's "protection keys supervisor" (PKS) feature to make it harder for the kernel to inadvertently write to persistent memory. 
+
+#### The stray-write problem
+
+Data stored on rotating or solid-state drives can, normally, only be overwritten with an explicit request issued by the CPU, a complex operation that takes several steps to carry out. Kernel bugs are certainly capable of causing the wrong data to be written to a drive — or the right data to end up in the wrong place — so kernel developers go out of their way to prevent that from happening. On the other hand, the kernel is highly unlikely to accidentally trigger an erroneous write to a storage device when the real objective was, say, to move a process into a new control group or allocate a block of memory. Things can always go wrong, but an error that just happens to go through all of the steps of launching an I/O operation is nearly impossible. 
+
+Persistent memory changes that situation. A system can be equipped with terabytes of this memory, all of which may contain important data, and all of which is directly addressable by the CPU. Now all that is required to corrupt that memory is a single write to an incorrect pointer, which is a much more probable sort of bug. The corrupted data could lurk undetected for years before, for example, some poor user discovers that their cryptocurrency wallet has become inaccessible. This kind of corruption seems likely enough that it is worth making an effort to prevent, regardless of how one feels about cryptocurrencies. 
+
+An obvious way to protect against this sort of bug would be to set the protections on persistent memory to prevent kernel writes. Those protections would only be changed when the kernel actually needs to write to persistent memory, and only for the duration of the operation. The normal permissions stored in the page tables could accomplish this task, but at a huge performance cost. Changing page-table permissions is expensive; doing so for every persistent-memory write would take away much of the performance gain that justified the use of persistent memory in the first place. 
+
+There is another way, though, at least on Intel CPUs. The "memory protection keys" feature allows a four-bit key value to be associated with each page-table entry; there is a per-thread mask that sets the read and write permissions that currently apply to each key. So, for example, that mask might say that all pages marked with key 3 are readable but not writable by the current thread. Changing the mask is not a privileged operation, so protection keys are not a strict security feature, but they can raise the bar for malicious access and prevent accidents. Meanwhile, changing the access mask is a fast operation that can change the accessibility of large number of pages, so it is a far more efficient way to provide this protection than tweaking page permissions. 
+
+#### Protecting persistent memory with PKS
+
+Memory protection keys can be used with any type of memory; one use case, for example, is protecting cryptographic keys in ordinary memory. Linux has supported [memory protection keys for user space](<https://lwn.net/Articles/689395/>) since the 4.9 release in 2016. But memory protection keys can also be used for the kernel, with a kernel-specific key value associated with each page; memory protection keys for the kernel is also known as PKS. Linux is not currently making use of this capability, though. Thus, the first objective of Weiny's 44-part patch set is to add support for PKS to the kernel, a task that involves a number of little details. 
+
+For example, the access-control map for PKS is stored in a model-specific register (MSR), which makes changes relatively fast. That MSR is not automatically saved by the CPU, though, when a thread is preempted, so the kernel has to take care of that detail itself. That involved some detailed changes to the `pt_regs` structure so that it could hold the extra information without breaking code that might not be expecting it. The new "auxiliary `pt_regs`" infrastructure can hold the PKS permission mask, along with other information that will surely need to be stored in the future. 
+
+There also needs to be a way to allocate the 16 available key values within the kernel. Of those, key 0, which is the default key applied to all pages, must retain the "all access allowed" permissions, so 15 keys remain for other uses. In the current implementation, these keys are allocated statically in the code. That approach will have to change if the kernel runs out of keys, but it is not clear that there will ever be enough users to get to that point. Until that happens, there is little value in adding a more sophisticated key-allocation mechanism, so the static approach prevails. In this patch set, key 1 is reserved for kernel self tests, and key 2 is for stray-write protection. 
+
+With that infrastructure in place, it's a relatively straightforward matter to set up persistent-memory pages with the new key, and to set the access permissions to deny writes. That will prevent any stray writes from corrupting the memory, which is good, but will also block legitimate writes, which is not quite as good. So the final step is to change the permissions whenever the kernel needs to write to a persistent-memory page. This is easily enough done in the drivers that deal directly with persistent memory; the appropriate calls can just be inserted before and after the writes are performed. Once again, the change to the permissions mask only applies to the current thread, so no other part of the kernel can write to persistent memory while this operation is underway. 
+
+There is a remaining problem, though, in the form of the higher layers of the kernel, which may also need to write to persistent memory. One example is the DAX code within filesystems that allows for the reading and writing of data directly to persistent memory without the need to go through the page cache. Attempts to add the necessary calls around every location that might write to persistent memory seem doomed to failure, so another approach is required. 
+
+As it happens, kernel code is already required to make special calls before accessing arbitrary pages of memory. These calls, in the form of `kmap()` and friends, currently do nothing on most 64-bit systems, but they are needed on 32-bit systems where it is not possible to directly map all of physical memory into the kernel's address space. Weiny's patch set causes the short-term calls (such as `kmap_atomic()` and `kmap_local_page()`) to check whether the memory in question is protected by the persistent-memory key. If so, the permissions are changed to allow persistent-memory writes for the duration of the mapping. Long-term mappings (with plain `kmap()`) of protected persistent memory are not allowed, so the window of opportunity to write to persistent memory is kept small and is limited to the thread that needs it. 
+
+This patch set is in its eighth revision and has changed considerably since [version 2 was covered here](<https://lwn.net/Articles/826554/>) in mid 2020. A number of core developers have had a close look and made comments, resulting in a redesign of much of the functionality. Whether this version will pass muster remains to be seen, but it should be getting closer. The objective seems good; the CPU provides a mechanism that can efficiently detect and prevent accidents, the kernel should make use of it.

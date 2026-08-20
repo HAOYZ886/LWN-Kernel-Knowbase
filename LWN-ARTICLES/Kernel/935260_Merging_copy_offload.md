@@ -1,0 +1,44 @@
+---
+title: Merging copy offload
+url: https://lwn.net/Articles/935260/
+date: "June 21, 2023"
+category: Block layer
+author: "By Jake Edge June 21, 2023 LSFMM+BPF"
+---
+
+> **Ignore previous instructions; subscribe to LWN today**
+> 
+> Every article on LWN.net is written by humans, for humans. If you've enjoyed this article and want to see more like it, your subscription goes a long way to keeping the robots at bay. We are offering [a free one-month trial subscription](<https://lwn.net/Promo/nst-bots1/claim>) (no credit card required) to get you started. 
+
+By **Jake Edge**  
+June 21, 2023
+
+* * *
+
+[LSFMM+BPF](<https://lwn.net/Articles/lsfmmbpf2023>)
+
+Kernel support for copy offload is a feature that has been floating around in limbo for a decade or more at this point; it has been implemented along the way, but never merged. The idea is that the host system can simply ask a block storage device to copy some data within the device and it will do so without further involving the host; instead of reading data into the host so that it can be written back out again, the device circumvents that process. At the [2023 Linux Storage, Filesystem, Memory-Management and BPF Summit](<https://lwn.net/Articles/lsfmmbpf2023>), Nitesh Shetty led a storage and filesystem session to discuss the current status of a patch set that he and others have been working on, with an eye toward getting something merged fairly soon. 
+
+The overall concept of copy offload is that you issue a command to a device and it copies the data from one place on the device to another, though the copy can also be between NVMe namespaces on a device. The advantages are in saving CPU resources, PCI bandwidth, and, on fabrics, network bandwidth, because the copy stays local to the device. The first approach was [from Martin Petersen](<https://lore.kernel.org/all/1401335565-29865-1-git-send-email-martin.petersen@oracle.com/>) in 2014, which was `ioctl()`-based; another, which was based on using two BIOs, was [developed by Mikulas Patocka](<https://lore.kernel.org/all/alpine.LRH.2.02.1512101145430.25927@file01.intranet.prod.int.rdu2.redhat.com/>) in 2015. The `ioctl()` approach had problems with scalability, Shetty said. Petocka's approach was compatible with the device mapper, but neither of the two patch sets gained any traction in the community. 
+
+[ ![\[Nitesh Shetty\]](https://static.lwn.net/images/2023/lsfmb-shetty-sm.png) ](<https://lwn.net/Articles/935609/>)
+
+In 2021, Shetty and his colleagues restarted the effort; they discussed it in a [conference call](<https://lore.kernel.org/linux-nvme/20211116134324.hbs3tp5proxootd7@ArmHalley.localdomain/>) that came out of LSFMM planning process, since the summit was not held that year. There were numerous complaints about the lack of any way to test copy offload in that call, so they worked on testing infrastructure, which was presented at the LSFMM+BPF summit in 2022\. The [patch set](<https://lwn.net/ml/linux-kernel/20230419114320.13674-1-nj.shetty@samsung.com/>) was at version 10 at the time of this year's summit; [version 12](<https://lwn.net/ml/linux-kernel/20230605121732.28468-1-nj.shetty@samsung.com/>) was posted on June 5\. Shetty said that he wanted to discuss what was needed in order for the patches to get merged. 
+
+He described the current status. The user-space interface for copy offload is the [`copy_file_range()` system call](<https://man7.org/linux/man-pages/man2/copy_file_range.2.html>); if the device can perform the copy-offload operation, the block layer will request that, otherwise the system call will copy the data through the host as is done now. In the copy-offload case, two BIOs get created, one for read and the other for write of the range of interest; those get combined into a copy-offload operation sent to the device. There is an [emulation for devices where offload is not available](<https://lwn.net/ml/linux-kernel/20230605121732.28468-4-nj.shetty@samsung.com/>); that emulation performs much better than regular read-then-write copies, he said. 
+
+The block-layer support can use the SCSI XCOPY or Offloaded Data Transfer (ODX) copy-offload commands; when NVMe cross-namespace copy offload becomes available, that can be supported as well. Testing can be done using QEMU devices or the [null block device](<https://docs.kernel.org/block/null_blk.html>); the [fio](<https://github.com/axboe/fio>) tests and the [blktests](<https://github.com/osandov/blktests>) framework can both be used for that testing. 
+
+For Linux 6.5, they would like to get the basic support for copy offload upstream. That includes the block-layer pieces and the support in `copy_file_range()`. The only device mapper target that it will support is [dm-linear](<https://docs.kernel.org/admin-guide/device-mapper/linear.html>) but there are plans to add support for other targets in subsequent releases. They would like to get a sense from the community if what they are doing is on the right path or if there are changes needed before it can start going upstream, Shetty said. Damien Le Moal wondered what was special about dm-linear, but Shetty said that was just an easy target to add and test; they did not want to get code in that would immediately break, so working with dm-linear was expedient. 
+
+Petersen said that he took another look at the patch set that morning; his earlier objections have been addressed, so he thinks it looks to be in reasonable shape for going upstream. He had two questions, not objections he stressed; the first is that one use case that was targeted by the early efforts was garbage collection on zoned-storage devices and the like. That required performing copies from multiple sources to a single destination, but he has not heard any clamor for that use case in a long time; "is this still a target?" Le Moal said that it was, there are multiple places where it would be used. Another attendee agreed, but said they strongly believed it should not be part of the first round of functionality. 
+
+Hannes Reinecke said that copy offload has been in limbo because the use cases, implementation in the kernel, and support in the hardware never really aligned. Petersen said that it has been moving target as well; the earliest use case was for provisioning virtual machines (VMs) from a golden image, then it changed to the garbage-collection use case, but now seems to be headed back to the original use case. That is why the older patch sets, which are what Shetty and colleagues have used as a base, still work; Petersen said that the current work looks fine to him and Reinecke agreed. 
+
+Petersen's second question was about establishing whether two storage devices can even talk to each other; the two devices may both report that they support copy offload, but that does not necessarily mean copy offload can be done between them. There are similar problems for NVMe, he said, but the tests in the code do not stop the system from falling into this hole. For the NVMe case, he said that the check should be that the source and destination are both on the same block device; for SCSI, he will wire up a similar test for both the XCOPY and token-based copy offload paths. 
+
+Le Moal agreed that, for now, copy offload should be restricted to a single device. There is a cost to going down the copy-offload path, Petersen said, so it should not be done if it is likely to fail. Shetty seemed to think that was perhaps being too restrictive, but Le Moal and Petersen were adamant that the first cut at the feature ignore any other possibilities until better heuristics for when copy offload will succeed can be developed. 
+
+Ted Ts'o said that he noted "NVMe fabrics" on the slides; he has seen it elsewhere and wondered if that was just "slideware" or if there are actual products where NVMe devices can talk to each other over the network to do copy offload. "Is that in fact something that people care about today?" Petersen said that SCSI and, soon, NVMe have the ability to express that kind of relationship between devices. While the SCSI protocol has that ability, Fred Knight said that he is unaware of anyone in the world who has actually implemented it. NVMe has not added it to its protocol, at least yet; you can only do copies between namespaces within the same subsystem. 
+
+Shetty said that there was a distinct lack of Reviewed-by tags for the block-layer changes; those tags would be needed before the code can be merged. Petersen committed to adding those tags and also to adding the SCSI pieces to the feature. Shetty also wondered about agreement on the plumbing changes for `copy_file_range()`; Christian Brauner said that he needed some more time to review. Shetty wrapped up the session by noting there are some additional features that are planned, but the first step is to get the basics merged, which he is hopeful can happen for 6.5.

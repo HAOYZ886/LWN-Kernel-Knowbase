@@ -1,0 +1,21 @@
+---
+title: Guest page hinting
+url: https://lwn.net/Articles/198380/
+date: "September 6, 2006"
+category: "Memory management-Virtualization; Virtualization"
+author: 
+---
+
+Paravirtualized systems are operating systems unto themselves - they look like independent systems to the greatest extent possible. In the end, however, a paravirtualized system is still running under a host, and must interact with that host. A recent set of patches (entitled "[guest page hinting](<https://lwn.net/Articles/198384/>)") shows how running paravirtualized systems in a fully independent mode can hurt performance - and the sorts of tricks which can be required to make things run more efficiently. 
+
+Consider, for example, a short-lived application which runs on a guest system. That application may dirty a number of pages, then exit, its job finished. The guest system knows that the dirty pages are no longer in use, and can be recycled. From the host's point of view, however, the only thing known is that the pages are dirty. So the host will, if needs to reclaim those pages, carefully write their (useless) data out to swap first. This is a wasted effort which would be nice to avoid. 
+
+The hinting patches add a couple of low-level primitives for use by guest operating systems: `set_page_unused()` and `set_page_stable()`. The former marks a page as being unneeded by the guest, while the latter marks the page as being in active use. The s/390 architecture (which is the main target for this patch set currently) can implement these states through a pair of page flags which the guest can set, making the operations fast. Once pages have been marked as unused, the host system can reclaim them with no further effort, making the whole virtual memory subsystem more efficient. 
+
+The next step is to consider page cache pages. These pages will contain data from a file found on a storage device somewhere, meaning that they can be recreated from the source if need be. That, in turn, means that the host could discard them in response to memory pressure. But, once again, the host knows nothing about the guests' page caches. So the hinting patches add another state, called "volatile," to mark pages with backing store. When the host is feeling memory pressure, it is free to discard volatile pages without saving their contents first. It must, however, make sure that the guest system knows that this action has taken place so that the page can be removed from the guest's page cache. In the current patch set, this notification only works for s/390 machines, however. 
+
+Pages which have been locked into memory pose an extra challenge here - they can be part of the page cache, but they still shouldn't be taken away by the host system. So such pages cannot be marked as "volatile." The problem is that figuring out if a page is locked is harder than it might seem; it can involve scanning a list of virtual memory area (VMA) structures, which is slow. So the hinting patches add a new flag to the `address_space` structure to note that somebody has locked pages from that address space in memory. When the flag is set, those pages are not marked as being volatile. 
+
+The swap cache also benefits from some hinting work - once the guest has written a page to swap, that page has good backing store and can be grabbed by the host system. The approach taken is similar to that used with the page cache, though there are a few extra details to take care of. For example, the guest must take care to have the page marked stable (and deal with its potentially having been discarded by the host) before freeing the associated entry in the swap area. 
+
+Attentive readers may have noticed that these patches are heavily oriented toward the s/390 architecture. IBM has, of course, been doing virtualization for a very long time, so it is not surprising that some relatively advanced virtualization patches are coming from that direction - or that IBM's architectures are designed with virtualization in mind. Other paravirtualization projects will encounter many of the same issues, however, and may well benefit from this work. So the next stage for this patch set should be consideration by other projects and possible work to make the hinting features more generally applicable.

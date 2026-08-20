@@ -1,0 +1,54 @@
+---
+title: On Rust in enterprise kernels
+url: https://lwn.net/Articles/993337/
+date: "October 10, 2024"
+category: "Development tools-Rust; Device drivers-Nouveau"
+author: "By Jonathan Corbet October 10, 2024"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+October 10, 2024
+
+At the recently concluded Maintainers Summit, it was [generally agreed that the Rust experiment would continue](<https://lwn.net/Articles/991062/>), and that the path was clear for more Rust code to enter the kernel. But the high-level view taken at such gatherings cannot always account for the difficult details that will inevitably arise as the Rust work proceeds. A recent discussion on the nouveau mailing list may have escaped the notice of many, but it highlights some of the problems that will have to be worked out as important functionality written in Rust heads toward the mainline. 
+
+#### The players
+
+Some context to begin: the [nouveau driver](<https://nouveau.freedesktop.org/>) handles NVIDIA GPUs. It was, for years, the product of a determined reverse-engineering effort in the absence of any help from NVIDIA; it was [first merged into the mainline](<https://lwn.net/Articles/366648/>) for the 2.6.33 release in 2009. More recently, NVIDIA [has been changing its tune](<https://lwn.net/Articles/953144/>) with regard to free-software support for its products, and has been helping with nouveau development. Ben Skeggs, who has worked on nouveau for years, recently took up employment there. 
+
+Nouveau has reached a reasonable level of functionality, but the developers in the kernel's DRM (graphics) subsystem are already looking at replacing it, at least for newer GPUs. Specifically, the [Nova project](<https://lwn.net/ml/nouveau/Zfsj0_tb-0-tNrJy@cassiopeiae/>) has been launched to create a new driver for NVIDIA GPUs going forward. Unlike nouveau, Nova will be written in Rust. The developers involved feel that using Rust is the best way to cope with the firmware interface in newer GPUs, which can change at any time without notice. Nova is a relatively young project that may not be ready to enter the mainline for, possibly, some years. 
+
+An entirely different part of the kernel is the [Virtual Function I/O (VFIO) subsystem](<https://docs.kernel.org/driver-api/vfio.html>). In short, VFIO is an interface for the control of I/O memory-management units (IOMMUs) that can be used to safely give access to a device to a user-space process. The IOMMU will ensure that the device only has access to the memory belonging to the process using it, preventing the device from (accidentally or deliberately) overwriting other parts of the system. VFIO is often used in systems running virtualized guests; each guest can be given access to the devices it needs while keeping the system as a whole secure. 
+
+To complete the cast of characters: in late September, Zhi Wang posted [a 23-part patch set](<https://lwn.net/ml/all/20240922124951.1946072-1-zhiw@nvidia.com>) implementing a new "vGPU" functionality for NVIDIA GPUs. There is an increasing market for cloud-based systems with GPU access so that we can all enjoy the benefits of large language models appearing uninvited in every aspect of our lives. The vGPU patches make it easy for cloud providers to give virtual machines access to one or more GPUs and to arbitrate the use of those GPUs when contention occurs. NVIDIA clearly thinks, probably with good reason, that this feature will make its GPUs more attractive to cloud providers, which are known to purchase a nontrivial amount of hardware. Befitting NVIDIA's more upstream-friendly approach, all of this work is aimed at the mainline kernel. 
+
+#### Backporting worries
+
+This new subsystem, as one might expect, is based on VFIO, meaning that the interfaces the kernel already exports for virtualized device control will work with NVIDIA GPUs. This decision is uncontroversial. But the vGPU work also depends on the nouveau driver for access to the hardware, and makes significant changes to nouveau to add the support it needs. This aspect attracted the attention of the developers behind Nova, who were concerned about basing this functionality on a driver that they are working to replace. The plan is that the chipsets to be managed by vGPU will be driven by Nova, so it is natural to want to see all of this work done there instead. 
+
+Danilo Krummrich [asked](<https://lwn.net/ml/all/ZvErg51xH32b8iW6@pollux>) what the strategy for vGPU was in the longer term: ""Is this more of a proof of concept? Do you plan to work on Nova in general and vGPU support for Nova?"" Jason Gunthorpe, who has seemingly had a hand in the design of the new subsystem, [answered](<https://lwn.net/ml/all/20240923150140.GB9417@nvidia.com>) that it ""is intended to be a real product that customers would use, it is not a proof of concept"". He is hoping to see it merged soon, he said. He finished by saying: ""As a commercial product this will be backported extensively to many old kernels and that is harder/impossible if it isn't exclusively in C."" 
+
+In other words, the new vGPU subsystem will be backported by distributors (and large-scale users) into "enterprise" kernels that, at their core, predate the introduction of Rust support into the mainline; Gunthorpe [estimated](<https://lwn.net/ml/all/20240926144057.GZ9417@nvidia.com>) that only 10% of the kernels running on the target systems are based on 6.0 or newer releases. Since the initial Rust support only landed in 6.1, and it is far from complete even now, any sort of Rust dependency will clearly make backporting vGPU harder, if indeed it can be done at all. The result could be that the vGPU subsystem doesn't find its way into those older kernels at all, which would be disappointing for many of the people (and companies) involved. Thus, Gunthorpe concluded, vGPU must remain based on nouveau for now, and the Nova project has to somehow live with that. 
+
+Krummrich [acknowledged](<https://lwn.net/ml/all/ZvHwzzp2F71W8TAs@pollux.localdomain>) that using nouveau for now is a reasonable approach, but worried that the addition of Nova would lead to a duplication of functionality within the kernel. To avoid that, he said, there needed to be an agreement that the vGPU developers would, in the longer term, commit to helping with Nova development and the movement of vGPU to a Nova base. Gunthorpe [agreed](<https://lwn.net/ml/all/20240924164151.GJ9417@nvidia.com>) that Nova might someday become the base for vGPU but pointed out that, while vGPU is a working driver that may be merged soon, Nova does not yet exist; ""let's not get too far ahead of ourselves here"". 
+
+#### Disagreement and options
+
+What followed was an occasionally heated discussion where the participants did not always seem to be understanding each other. Gunthorpe [suggested](<https://lwn.net/ml/all/20240924234737.GO9417@nvidia.com>) that a core driver (written in C) could be created with just enough functionality to allow higher-level drivers to communicate with the devices; nouveau and Nova could both sit on top of that core driver. DRM maintainer Dave Airlie, though, [insisted](<https://lwn.net/ml/all/CAPM=9tx+uU=uceg=Zr4N9=Y28j8kHnBVD+J9sf9xkfJ1xtTXEA@mail.gmail.com>) that the lowest levels need to be in Rust: 
+
+> The core has to be rust, because NVIDIA has an unstable firmware API. The unstable firmware API isn't some command marshalling, it's deep down into the depths of it, like memory sizing requirements, base message queue layout and encoding, firmware init procedures. These are all changeable at any time with no regard for upstream development, so upstream development needs to be insulated from these as much as possible. Using rust provides that insulation layer. 
+
+He suggested that there could be ways to plan the transition to make life as easy as possible on the VFIO side. Gunthorpe [answered](<https://lwn.net/ml/all/20240925012935.GQ9417@nvidia.com>) that: ""We can't have rust in VFIO right now, we don't have that luxury. This is just a fact, I can't change it."". He also said that his objection to Rust in VFIO would be somewhat reduced ""if the backporting can be shown to be solved"". Perhaps, he said, a minimal core driver could be written in Rust as an alternative to a C version, and that could be used to see how hard the backporting problem really is. 
+
+With regard to backporting, Greg Kroah-Hartman [advised](<https://lwn.net/ml/all/2024092614-fossil-bagful-1d59@gregkh>) Gunthorpe to ""never make design decisions based on old ancient commercial kernels that [don't] have any relevance to upstream kernel development today"". If companies are interested in having vGPU support in enterprise kernels, he said, they should just pay for the backporting of the necessary patches into those kernels. Gunthorpe [replied](<https://lwn.net/ml/all/20240926124239.GX9417@nvidia.com>) that he is not ready to accept any such dependency until the kernel community has decided that Rust support is no longer experimental. He also expressed hope that the problem would just go away: 
+
+> This argument is *way too early*. I'm deeply hoping we never have to actually have it, that by the time Nova gets merged Rust will be 100% ready upstream and there will be no issue. Please? Can that happen? 
+
+The conversation eventually just faded away. In the short term, there are no decisions that need to be made; the only way for vGPU to work in current mainline kernels is to use nouveau, so it would be surprising indeed if it were not merged in that form. Even the Nova developers have not argued against that. In the longer term, with luck, things will play out as Gunthorpe hopes and, when Nova is ready to go upstream, the course of action there will be clear as well. 
+
+Perhaps life will not be quite that easy, but there is reason for optimism anyway. While the positions on both sides appeared to be absolute, all of the developers involved have shown interest in finding solutions that would work for everybody. There is no disagreement over the long-term goals that the community is working toward, and there is reason to believe that an agreement will be found on how to get there. 
+
+Some of the themes that came up in this discussion are likely to recur, though. _Any_ functionality that is dependent on Rust code is going to be a challenge to backport to ancient enterprise kernels, so merging that code may draw opposition, even from developers who are supportive of Rust in general. At some point, if the Rust project is going to succeed, the kernel will have to make that leap. Expect some further discussions, though, on just when that point should be reached.

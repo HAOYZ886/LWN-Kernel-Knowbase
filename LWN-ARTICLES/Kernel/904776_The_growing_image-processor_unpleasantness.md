@@ -1,0 +1,42 @@
+---
+title: "The growing image-processor unpleasantness"
+url: https://lwn.net/Articles/904776/
+date: "August 18, 2022"
+category: "Device drivers-Video4Linux2"
+author: "By Jonathan Corbet August 18, 2022"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+August 18, 2022
+
+There was a time when care had to be taken when buying hardware if the goal was to run Linux on it. The situation has improved considerably in recent decades, and unsupported hardware is more the exception than the rule. That has, for many years, been especially true of Intel hardware; that company has made a point of ensuring that its offerings work with Linux. So it is a bit surprising that the IPU6 image processor shipped with [Alder Lake](<https://en.wikipedia.org/wiki/Alder_Lake>) CPUs lacks support in Linux, and is unlikely to get it anytime soon. The problem highlighted here goes beyond just Intel, though. 
+
+The IPU6, like most image processors, exists to accept a data stream from a camera sensor and turn it into a useful video stream. These processors can take on a lot of tasks, including rotation, cropping, zooming, color-space conversion, white-balance correction, noise removal, focus management, and more. They are complex devices; the kernel community has responded by creating some equally complex APIs, including [Video4Linux2](<https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html>) (V4L2) and [media controller](<https://www.kernel.org/doc/html/latest/userspace-api/media/mediactl/media-controller.html>), to allow user space to manage them. As long as a device comes with a suitable driver, the kernel can make a camera device available to user space which, with care, can work with it without needing to know the details of the hardware. 
+
+As Paul Menzel recently [pointed out](<https://lwn.net/ml/linux-kernel/52c87d91-422d-fca0-4dd5-bbaa559c81b6@molgen.mpg.de/>) on the linux-kernel mailing list, there is no such driver for the IPU6, so a mainline Linux kernel cannot drive it. As a result, the kernel lacks support for [MIPI](<https://www.mipi.org/specifications/csi-2?hsLang=en>) cameras on some current laptops, including some versions of the Thinkpad X1 Carbon and Dell XPS 13, which are relatively popular with Linux users (cameras using other interfaces, such as USB UVC, are generally supported). To get around this problem, Dell ships a closed-source, user-space driver in the Ubuntu build it offers on the XPS 13\. Lenovo, instead, [is not selling](<https://lwn.net/ml/linux-kernel/9a396cc3-5b0f-6db3-bad5-b4d81ecdf834@lenovo.com/>) the affected systems with Linux preloaded at all at this point. 
+
+Laurent Pinchart [provided more details](<https://lwn.net/ml/linux-kernel/YvUKLbv%2FpOfbbeL+@pendragon.ideasonboard.com/>) on this situation. IPU6 support on Ubuntu is based on a kernel driver that provides a V4L2 interface, but which interfaces with a proprietary user-space driver to actually get the work done. As Ubuntu's [Dell page](<https://wiki.ubuntu.com/Dell>) notes, this solution is not without its costs: ""CPU performance is impacted by a daemon doing buffer copying for v4l2 loopback device"" and the camera can only provide 720p resolution. Pinchart went on to say that the IPU6 will not be the only problematic device out there: 
+
+> Given the direction the industry is taking, this situation will become increasingly common in the future. With the notable exception of Raspberry Pi who is leading the way in open-source camera support, no SoC vendor is willing today to open their imaging algorithms. 
+
+Improving this situation will require work on a couple of fronts. On the user-space side, Pinchart pointed out that the [libcamera project](<https://libcamera.org/>) was created for the explicit purpose of supporting complex devices like the IPU6; this project was [covered here](<https://lwn.net/Articles/794555/>) in 2019. Among other things, libcamera was designed to allow the plugging-in of proprietary image-processing code while maximizing free-software choice. It currently supports the earlier IPU3 processor either with or without the proprietary plugin, though not all functionality is available without it. 
+
+Providing a similar level of support for the IPU6 should be possible, but it will take a fair amount of work. It also is going to need a proper kernel driver for the IPU6, which could be a problem. Evidently, the complexity of this device is such that the V4L2 API cannot support it, so a new API will be required. A candidate API exists in a preliminary form; it is called CAM (or KCAM) and, [according to Sergey Senozhatsky](<https://lwn.net/ml/linux-kernel/YvmqL6Wz7o77ukF5@google.com/>), the plan is to get that merged into the kernel, then to add an IPU6 driver that implements this API. Pinchart [responded](<https://lwn.net/ml/linux-kernel/YvnYJut3qIvIMVWa@pendragon.ideasonboard.com/>) that this merging will not happen quickly because the API, as proposed, is not seen favorably in the kernel community. 
+
+The V4L2 API has required extensive development and evolution over many years to reach its current point; it will not be replaced overnight. That is doubly true if the proposed alternative has been developed in isolation and never been through any sort of public discussion, which is the case here. Senozhatsky [posted](<https://lwn.net/ml/linux-kernel/YvnrJBI8599+E43T@google.com/>) a pointer to [a repository](<https://chromium-review.googlesource.com/c/chromiumos/third_party/kernel/+/3668500/>) containing a CAM implementation, but that code is only enlightening in the vaguest terms. There is no documentation and no drivers actually implementing this API. It is highly abstracted; as Sakari Ailus [put it](<https://lwn.net/ml/linux-kernel/YvoWSyWmmLvbW4Mr@paasikivi.fi.intel.com/>): ""I wouldn't have guessed this is an API for cameras if I hadn't been told so"". 
+
+Creating a new camera API will be, as Ailus [described it](<https://lwn.net/ml/linux-kernel/YvyiLHBgRQ9XsTrW@paasikivi.fi.intel.com/>), ""a major and risky endeavour""; it will require a long conversation, and it's not clear that CAM has moved the clock forward by much. [According to Senozhatsky](<https://lwn.net/ml/linux-kernel/YvnwtN1SwQjilJ97@google.com/>), the CAM code will not be submitted upstream for ""several months"". He later [suggested](<https://lwn.net/ml/linux-kernel/Yvn0o96K8j5gRaWM@google.com/>) that this plan could be accelerated, but the fact remains that the community has not even begun the process of designing an API that is suitable for the next generation of image processors. 
+
+The bottom line is that purchasers of Linux systems are going to have to be more careful for some time; many otherwise nice systems will not work fully without a proprietary camera driver and, as a result, will lack support in many distributions. Making this hardware work at all will involve losing CPU performance to the current workaround. Working all of this out is likely to take years and, even then, it's not clear that there will be viable free-software solutions available. It is a significant step backward for Intel, for Linux, and for the industry as a whole. 
+
+**Postscript** : we were asked to add the following statement by the KCAM developers, who feel that the portrayal of the project in this article was not entirely fair: 
+
+> Google has been working closely with the community members and hardware vendors since 2018. This includes organising two big workshops ([in 2018](<https://linuxtv.org/news.php?entry=2018-07-13.mchehab>) and [2020](<https://lists.libcamera.org/pipermail/linux-camera/2020-February/000014.html>)). 
+> 
+> The development has been [done in public](<https://chromium.googlesource.com/chromiumos/third_party/kernel/+/refs/heads/kcam>) and has been [presented in public forums](<https://www.youtube.com/watch?v=KL3ajTu8VzU>) to welcome as many interested parties as possible. 
+> 
+> We are looking forward to completing the development of the initial proposal and posting it on the mailing list, to get the opinion of the community. ChromeOS believes in “Upstream first” for our kernel work and will continue to work in that direction.

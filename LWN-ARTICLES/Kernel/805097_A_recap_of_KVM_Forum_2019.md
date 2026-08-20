@@ -1,0 +1,85 @@
+---
+title: A recap of KVM Forum 2019
+url: https://lwn.net/Articles/805097/
+date: "November 19, 2019"
+category: KVM
+author: "November 19, 2019 By Cornelia Huck, Pankaj Gupta, Stefan Hajnoczi, and Stefano Garzarella KVM Forum"
+---
+
+> **Please consider subscribing to LWN**
+> 
+> Subscriptions are the lifeblood of LWN.net. If you appreciate this content and would like to see more of it, your subscription will help to ensure that LWN continues to thrive. Please visit [this page](<https://lwn.net/Promo/nst-nag1/subscribe>) to join up and keep LWN on the net. 
+
+November 19, 2019
+
+By Cornelia Huck, Pankaj Gupta, Stefan Hajnoczi, and Stefano Garzarella
+
+* * *
+
+[KVM Forum](<https://lwn.net/Archives/ConferenceByYear/#2019-KVM_Forum>)
+
+The 13th [KVM Forum](<https://events19.linuxfoundation.org/events/kvm-forum-2019/>) virtualization conference took place in Lyon, France in October 2019\. One might think that development may have finished on the Kernel Virtual Machine (KVM) module that was merged in Linux 2.6.20 in 2007, but this year's conference underscored the amount of work still being done, particularly on side-channel attack mitigation, I/O device assignment with VFIO and mdev, footprint reduction with micro virtual machines (VMs), and with the ability to run VMs nested within VMs. Many talks also involved the virtual machine monitor (VMM) user-space programs that use the KVM kernel module—of which [QEMU](<https://qemu.org/>) is the most widely used.
+
+#### Side-channel attacks and memory isolation/encryption
+
+Side-channel attacks leak sensitive information by attackers using mechanisms other than the intended input and output methods. They have become more problematic, recently, by being coupled with speculative execution. The KVM project is looking at ways to mitigate these attacks.
+
+Dario Faggioli presented "[Core-Scheduling for Virtualization: Where are We?](<https://kvmforum2019.sched.com/event/TmwB/core-scheduling-for-virtualization-where-are-we-if-we-want-it-dario-faggioli-suse>)" for a scheduler-centric way of mitigating side-channel attacks.
+
+[ ![\[Group photo\]](https://static.lwn.net/images/2019/kvmf-group-sm.jpg) ](<https://lwn.net/Articles/805113/>)
+
+With simultaneous multi-threading ("hyperthreading" or SMT), cores are shared by threads; some of the CPU resources are shared and the threads share cache (even L1), which boosts performance with SMT-aware scheduling. Core scheduling tags tasks that can be scheduled together on a core. The scheduler will only place tasks with the same tag onto a core at any given time. Tasks in different security domains can be given different tag values to ensure they do not share the same core, thus thwarting some side-channel attacks. Core scheduling also helps achieve fairness of accounting in cloud environments where a busy thread may consume more CPU resources than a less busy thread sharing the same core.
+
+Core scheduling can also be used to align guest virtual CPUs (vCPUs) with the host SMT topology so that intelligent scheduling decisions are made. Furthermore, [L1 Terminal Fault](<https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/l1tf.html>) (L1TF) and [Microarchitectural Data Sampling (MDS)](<https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/mds.html>) are the two prominent side-channel attacks that core scheduling addresses.
+
+The goal of core scheduling as a side-channel-attack mitigation is to achieve higher performance than by disabling SMT altogether. Hyper-V and Xen already support core scheduling. Patches for Linux are not yet upstream and a set of benchmark results shows that performance still varies wildly between workloads. More work is needed to handle pathological cases where workloads run much slower with core scheduling.
+
+L1TF is a hardware vulnerability that allows unprivileged speculative access to data which is available in the level-1 data (L1D) cache when the page-table entry (PTE) for a virtual address has the "present" bit cleared or other reserved bits set. If an instruction accesses a virtual address mapped by a non-present PTE, a page fault is raised only when the faulting instruction retires. Until then, the speculative value from the L1D cache is computed. This can result in unauthorized access through the faulting instruction and can leak a secret key from another guest or from the host system.
+
+This problem can be mitigated by flushing the L1D cache on entry to the VM and by using a shadow memory-management unit (MMU). Flushing the L1D cache is not sufficient to mitigate L1TF attacks when hyperthreading is enabled because the L1D cache is shared between hyperthreads on same core. Guest vCPUs can leak L1D cache data populated either by sibling hyperthreads running vCPUs of another VM or by sibling hyperthreads running vCPU threads that are currently running the VM-exit handler (where the VM is exited to give control to the kernel or user space to handle a request).
+
+Liran Alon and Alexandre Chartre gave a talk on "[KVM Address Space Isolation (ASI)](<https://kvmforum2019.sched.com/event/TmvY/kvm-address-space-isolation-alexandre-chartre-liran-alon-oracle>)", which is a feature that introduces a separate virtual address space for VM-exit handlers. Previous mitigations excluded data from the virtual address space, but it is difficult to identify all of the sensitive data. KVM ASI is a whitelist approach that builds a virtual address space with only the data actually required by KVM's VM-exit handlers.
+
+Thomas Lendacky covered the status of the AMD Secure Encrypted Virtualization (SEV) CPU feature in "[Improving and Expanding SEV Support](<https://kvmforum2019.sched.com/event/Tmwl/improving-and-expanding-sev-support-thomas-lendacky-amd>)". SEV protects VMs from an untrusted hypervisor such as when deploying a VM on a public cloud. Guest memory is encrypted so that the hypervisor cannot inspect or modify its contents. Lendacky discussed current developments with SEV such as eliminating memory pinning, live migration, and SEV with encrypted state (SEV-ES).
+
+SEV live migration uses separate encryption keys for the source and destination VM and the keys are not migrated. The firmware requires a copy of encrypted memory and special transport keys are used for moving pages between hosts.
+
+For SEV performance reasons, guest memory is currently pinned. Pinning memory is undesirable because it prevents swapping and overcommitting. Options to eliminate guest-memory pinning by preventing page movement (migration/swapping) and SEV firmware-related work to copy encrypted pages are being investigated. Future work also includes support for SEV-ES for encryption of VM registers and SEV-SNP (Secure Nested Paging).
+
+Recently, s390 joined the list of architectures implementing encryption or protection of virtual machines. In "[Protected Virtual Machines for s390x](<https://kvmforum2019.sched.com/event/Tmve/protected-virtual-machines-for-s390x-claudio-imbrenda-ibm>)", Claudio Imbrenda gave an overview of this architecture. The hypervisor is considered untrusted, so the only trusted entity in the system is the "ultravisor" that is implemented in hardware and firmware. It decrypts and verifies the boot image for "protected guests", and proxies interactions between the hypervisor and guests. The hypervisor may not access any of the protected guest's memory other than what that guest shared with it for I/O. The s390 code was able to reuse a lot of the infrastructure that had already been introduced for AMD SEV.
+
+#### VFIO and mdev
+
+The [VFIO driver](<https://www.kernel.org/doc/html/latest/driver-api/vfio.html>) in Linux exposes physical PCI adapters and other devices to applications. VFIO is used by user-space device drivers in software-defined networking applications and in VMMs such as QEMU to pass physical PCI adapters through to guests. Now an ecosystem of additional drivers built on top of VFIO is enabling additional use cases.
+
+In "[Toward a Virtualization World Built on Mediated Pass-Through](<https://kvmforum2019.sched.com/event/TmvP/toward-a-virtualization-world-built-on-mediated-pass-through-kevin-tian-intel>)", Kevin Tian presented an overview of this growing ecosystem that builds on the VFIO and [mediated device framework](<https://www.kernel.org/doc/html/latest/driver-api/vfio-mediated-device.html>) (mdev) drivers in Linux. While VFIO exposes physical devices to user space, the mdev framework makes it possible to write pure software devices or to combine hardware and software functionality. This can be used to add software logic on top of hardware, for example, to work around hardware limitations or to present a subset of the functionality embodied in the hardware.
+
+One of these new VFIO/mdev applications was presented in more detail by Xin Zeng and Yi Liu in their talk "[Bring a Scalable IOV Capable Device into Linux World](<https://kvmforum2019.sched.com/event/Tmwu/bring-a-scalable-iov-capable-device-into-linux-world-xin-zeng-yi-liu-intel>)". Data-center PCI adapters sometimes support PCI [single-root I/O virtualization](<https://en.wikipedia.org/wiki/Single-root_input/output_virtualization>) (SR-IOV), a feature that splits the adapter into virtual function (VF) child devices that can be individually passed through to guests. This allows multiple virtual machines to safely share access to a PCI adapter, although only a subset of resources is available through each VF. The newer scalable I/O virtualization approach replaces the hardware SR-IOV feature with an mdev software driver that decides which hardware resources to pass through directly and which ones to emulate in software.
+
+Another aspect of mediated devices was presented by Thanos Makatos and Swapnil Ingle in their "[muser: Mediated User Space Device](<https://kvmforum2019.sched.com/event/TmvV/muser-mediated-user-space-device-thanos-makatos-swapnil-ingle-nutanix>)" presentation. Muser is an mdev kernel driver and associated libmuser user-space library for implementing device emulation programs in user space. A program using the libmuser API can implement a VFIO-capable PCI device in software. QEMU and other VMMs can then pass this device through to a guest. Both C and Python bindings were presented for writing software PCI devices in user space. The API revolves around registering a PCI device description and then handling device accesses either through callbacks or by polling `mmap()`-ed register space when performance is critical. The device emulation program can define the PCI Base Address Registers (BARs), configuration space, and other standard PCI functionality in order to emulate existing or custom PCI devices.
+
+#### Micro VMs and new VMMs
+
+In the last few years, containers and micro-services have become more and more popular. Cloud users and providers are looking at virtual machines to increase the security and isolation of these workloads, and several sessions presented KVM-based solutions.
+
+In "[Firecracker: Lessons from the Trenches](<https://kvmforum2019.sched.com/event/TmwZ/firecracker-lessons-from-the-trenches-andreea-florescu-alexandra-iordache-amazon>)", Andreea Florescu and Alexandra Iordache presented a lightweight VMM written in Rust: [Firecracker](<https://firecracker-microvm.github.io/>). It is designed for multi-tenant cloud workloads like containers and [functions as a service](<https://en.wikipedia.org/wiki/Function_as_a_service>) (FaaS). Its key features are minimal boot time, low memory footprint, and over-subscription of CPUs and memory. Each Firecracker process handles a single micro-VM and uses `chroot()`, control groups, and seccomp to delimit security boundaries. Rust allowed them to write more reliable code, but Florescu and Iordache described a few bugs that crept through, including an integer overflow that caused Firecracker to potentially run afoul of undefined behavior.
+
+Continuing on the Rust theme, Alibaba, AWS, CloudBase, Google, Intel, and Red Hat have collaborated on [rust-vmm](<https://github.com/rust-vmm/community>), which is a collection of Rust crates for virtualization software. Florescu and Samuel Ortiz talked about that in "[Playing Lego with Virtualization Components](<https://kvmforum2019.sched.com/event/Tmvq/playing-lego-with-virtualization-components-andreea-florescu-amazon-samuel-ortiz-intel>)". They explained that Rust's key features (memory safety, safe concurrency, and great performance) fit well with the VMM requirements. Some examples of components provided by rust-vmm are API bindings (KVM, VirtIO, VFIO), a memory model, a kernel loader, and several utility libraries.
+
+In "[Bring QEMU to Micro Service World](<https://kvmforum2019.sched.com/event/Tmx9/bring-qemu-to-micro-service-world-xiao-guangrong-zhang-yulei-tencent-cloud>)", Xiao Guangrong and Zhang Yulei described how they used QEMU to launch micro-services extremely quickly. Their solution, called QEMU basepoint, bypasses QEMU and guest initialization. Using the existing QEMU migration feature, it saves the state of the VM into a template file just after it starts. Then it uses this basepoint to launch new VMs. To save QEMU initialization time as well, the new VMs are handled by a fork of the base QEMU process. This solution allows them to reduce the boot time, but it still has limitations, such as the lack of kernel address-space layout randomization, that will be addressed in the future.
+
+#### Nested virtualization
+
+Nested virtualization is the idea of running virtual machines inside other virtual machines via the same or a different hypervisor. With the popularity of cloud infrastructure, which typically uses virtualization, the kernel is frequently already running on top of another hypervisor, so nested virtualization is needed to run KVM. Nested virtualization has therefore become important for development, continuous integration (CI), and production environments running in the cloud. Two talks at KVM Forum looked at testing these setups from different perspectives. 
+
+In "[Managing Matryoshkas: Testing Nested Guests](<https://kvmforum2019.sched.com/event/TmxC/managing-matryoshkas-testing-nested-guests-marc-hartmayer-ibm>)", Marc Hartmayer presented an approach for testing deeply nested setups (up to seven levels) using existing Python test infrastructure via the [Avocado testing framework](<https://avocado-framework.github.io/>). He used the [Mitogen](<https://mitogen.networkgenomics.com/>) library to run Python code remotely on the guest, reusing existing virtualization tests on nested guests. A short demo showed that this setup is easy to extend and information on test results is easy to obtain even for more deeply nested guests. Hartmayer used the Avocado-vt plugin for his implementation, but integration with the simpler Avocado-QEMU infrastructure (already in use in QEMU's acceptance test suite) should be doable once the needed Mitogen changes have hit upstream.
+
+In "[Nesting&testing](<https://kvmforum2019.sched.com/event/TmwW/nestingtesting-vitaly-kuznetsov-red-hat>)" Vitaly Kuznetsov looked in some detail at how nested virtualization on x86 is tested today. Two testing frameworks complement each other: kvm-unit-tests, which makes use of QEMU to run tests, and kvm-selftests, which uses custom user-space tooling to allow testing corner cases at the price of making the tests more complicated to write. Furthermore, testing can use tests specifically written to test nested functionality, or it can run preexisting virtualization tests under a hypervisor; the latter is for example how KVM under Hyper-V is tested.
+
+Looking at the tests currently available, VMX for Intel CPUs has a lot of tests in what Kuznetsov labeled the "correctness", "functional", and "regression" test categories in kvm-unit-tests; SVM for AMD CPUs, however, has very few tests, mostly in the "functional" category. For kvm-selftests, the situation for AMD CPUs looks even more dire, as there is currently no support for SVM at all; SVM certainly can do with some more love.
+
+Other than adding more tests, integrating running the tests already available into some kind of CI is obviously a good idea; especially as this enables running them in more nested environments, including Hyper-V/Azure, which not everybody may have easy access to.
+
+#### Conclusion
+
+This covers the main themes at KVM Forum 2019. A number of interesting talks explored other areas and are [available for watching online](<https://www.youtube.com/playlist?list=PLW3ep1uCIRfwwtvUS1Pco6Y0X-5tykpyG>) (along with all the presentations). It is a safe bet that side-channel attack mitigations will remain a topic at [KVM Forum 2020](<https://events.linuxfoundation.org/kvm-forum/>) in Dublin, Ireland next year and that the VFIO/mdev ecosystem will grow as both hardware vendors and software takes advantage of its capabilities. The presence of Amazon, Google, Microsoft, Tencent, and Huawei underscored how pervasive KVM has become in cloud hosting and that its use will continue to grow in the foreseeable future.

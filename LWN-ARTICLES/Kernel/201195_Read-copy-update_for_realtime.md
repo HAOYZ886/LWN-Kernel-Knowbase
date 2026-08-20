@@ -1,0 +1,27 @@
+---
+title: "Read-copy-update for realtime"
+url: https://lwn.net/Articles/201195/
+date: "September 26, 2006"
+category: "Read-copy-update; Realtime"
+author: 
+---
+
+The developers working on realtime response for Linux have stated their intent to merge many of their remaining changes into 2.6.19. One of those changes is a reworking of the read-copy-update mechanism for lower latencies; this work appears likely to go in regardless of the fate of the rest of the realtime code. So it's worth a look. 
+
+RCU, remember, is a mechanism which allows certain types of data structure to be updated without requiring locking between readers and writers. It works by splitting the update process into two steps: (1) replacing a pointer to old data with a pointer to the updated version, and (2) deferring the removal of the old data structure until it is known that no kernel code holds any references to that structure. The part about knowing that no references are held is handled by (1) requiring all code which references RCU-protected data structures to be atomic, and (2) waiting until all processors have scheduled once. Since a processor which schedules is not running atomic code, it cannot hold any references to RCU-protected data structures from before the call to `schedule()`. 
+
+This mechanism works well for most systems, but it presents a problem in realtime environments. The requirement that references to RCU-protected data structures be handled by atomic code means that any such code cannot be preempted. That, in turn, increases latencies, which is just what the realtime code is trying to avoid. So another solution had to be found. A couple of ideas have been pursued, one of which is now advanced to the point that it will likely find its way into 2.6.19. Here we'll take a superficial look at how realtime RCU works; anybody interested in the details is advised to have a look at [the realtime RCU paper [PDF]](<http://www.rdrop.com/users/paulmck/RCU/OLSrtRCU.2006.08.11a.pdf>) from the 2006 Ottawa Linux Symposium. 
+
+Fixing the RCU latency problem means ending the requirement that RCU-protected code be non-preemptible. And that, in turn, means that RCU can no longer count on a processor rescheduling meaning that no references to RCU-protected structures exist on that processor. So the accounting must be done in a more explicit manner. The realtime RCU code handles this accounting with two sequence numbers, two per-CPU counters and three linked lists. 
+
+The sequence numbers track the specific batches of RCU callbacks to process; for added confusion value, both are named "completed," though they live in two different global structures. The value `rcu_ctrlblk.completed` is the current batch number, which is accumulating new callbacks to process; `rcu_data.completed`, instead, is the number of the last batch of callbacks to have been processed. 
+
+Within any given RCU batch, one of the per-CPU counters tracks the number of kernel threads which are currently executing within RCU critical sections. During this batch, any RCU callbacks queued (with `call_rcu()`) will be appended to the first of the linked lists: `rcu_data.nextlist`. Whenever code calls `rcu_read_lock()`, the appropriate counter is incremented; a pointer to that counter is also stored so that, should the thread change processors before calling `rcu_read_unlock()`, the right counter will be decremented. 
+
+Another reason for storing a pointer to the counter has to do with the batch "flip" logic. When the RCU code decides that it is time to start a new batch, it increments `rcu_ctrlblk.completed`; that, in turn, will cause `rcu_read_lock()` to switch to the second per-CPU counter, which will start out at zero. Any new entries into RCU critical sections will increment the new counter. Meanwhile, any code which was in such a section when the flip happened retains a pointer to the old counter. So, when that code calls `rcu_read_unlock()`, the older counter will be decremented. When all of the counters from the old batch reach zero, the kernel knows that all references to RCU-protected data from the old batch are gone, and the corresponding RCU callbacks can be called. 
+
+Also at flip time, the set of RCU callbacks in `rcu_data.nextlist` is moved over to `rcu_data.waitlist`, since those callbacks are now waiting for any possible remaining references to go away. When all of the counters for that batch drop to zero, these callbacks are moved to the third list (`rcu_data.donelist`) so that they can be invoked whenever the kernel decides to get around to it. That work currently happens in a tasklet, but there is another patch queued for 2.6.19 which moves that work over to a separate software interrupt handler. 
+
+With this code in place, code within an RCU critical section can be preempted and it will still be possible to know when all references to protected data structures are gone. RCU critical sections still cannot sleep, of course, or they could delay the batch flip indefinitely. But they can be pushed out of the way temporarily if a higher-priority process needs to run. 
+
+The overall overhead of the new mechanism is higher, however, since it must maintain all of those counters. For this reason, it is unlikely to ever be the default RCU on most systems. Instead, the plan is to ship two RCU implementations, "classic" and "preempt," and allow the person configuring the kernel to choose between them.

@@ -1,0 +1,40 @@
+---
+title: The trouble with IPv6 extension headers
+url: https://lwn.net/Articles/808896/
+date: "January 7, 2020"
+category: "Networking-IPv6"
+author: "By Jonathan Corbet January 7, 2020"
+---
+
+> **This article brought to you by LWN subscribers**
+> 
+> Subscribers to LWN.net made this article -- and everything that surrounds it -- possible. If you appreciate our content, please [buy a subscription](<https://lwn.net/Promo/nst-nag3/subscribe>) and make the next set of articles possible. 
+
+By **Jonathan Corbet**  
+January 7, 2020
+
+It has taken longer than anybody might have liked, but the IPv6 protocol is slowly displacing IPv4 across the Internet. A quick, highly scientific "grep the access logs" test shows that about 16% of the traffic to LWN.net is currently using IPv6, and many large corporate networks are using IPv6 exclusively internally. This version of the IP protocol was designed to be more flexible than IPv4 in a number of ways; the "extension header" mechanism is one way in which that flexibility is achieved. A proposal to formalize extension-header processing in the kernel's networking stack has led to some concerns, though, about how this feature will be used and what role Linux should play in its development. 
+
+In both versions of the IP protocol, the header of each packet contains a collection of information about how the packet is to be handled; at a minimum, it contains source and destination addresses and a higher-level protocol number. In IPv4, the contents of the header are rigidly specified; it is difficult to add new types of information to the header. When IPv6 was designed, [extension headers](<https://en.wikipedia.org/wiki/IPv6_packet#Extension_headers>) were added as a way to (relatively) easily add new information in the future. 
+
+A few extension header types are defined in [RFC8200](<https://tools.ietf.org/html/rfc8200>) (which describes IPv6). Two of particular interest are the "Hop-by-Hop" and "Destination" headers; the former is meant to be acted upon by every system that handles the packet, while the latter is only for the destination node's attention. These headers may contain one or more options, each encoded in a type-length-value (TLV) format. RFC8200 only defines a couple of options that insert padding into the header, but there is interest in adding a number of others. 
+
+For example, [In-situ Operations, Administration, and Maintenance options](<https://tools.ietf.org/html/draft-ietf-ippm-ioam-ipv6-options-00>) are meant to allow providers to collect telemetry information on packets passing through their networks. The [Path MTU mechanism](<https://tools.ietf.org/html/draft-hinden-6man-mtu-option-00>) uses a Hop-by-Hop option to discover the maximum packet size a path can handle. [Firewall and Service Tickets](<https://www.ietf.org/archive/id/draft-herbert-fast-04.txt>) (FAST) are a Hop-by-Hop option that documents a packet's right to traverse a network or pass through a firewall. The [Segment Routing](<https://lwn.net/Articles/722804/>) options allows a packet to contain the path it should take through a network. And so on. 
+
+Tom Herbert has been working on [a patch series](<https://lwn.net/ml/netdev/1577400698-4836-1-git-send-email-tom@herbertland.com/>) making a number of changes to how IPv6 extension headers are handled in Linux. It adds infrastructure to allow kernel modules to register their support for specific Hop-by-Hop and Destination options, and makes the creation and parsing of the associated TLVs easy. Specific options may be added to packets or connections by unprivileged users, while others are restricted to privileged users only; either way, the code tries to ensure that the options are well-formed and ordered correctly. 
+
+One of the most controversial features is not actually a part of this patch set; Herbert lists it as work for the future. This feature would perform the insertion of new extension headers into packets passing through a system. Header insertion is a violation of RFC8200, but that naturally doesn't stop the purveyors of routers and other middleboxes from doing it anyway. That creates all of the usual problems, including packet transmission failing for reasons that are entirely opaque to a distant sender, proprietary headers leaking onto the public Internet, and more. 
+
+Networking maintainer David Miller was [less than pleased](<https://lwn.net/ml/netdev/20200102.134138.1618913847173804689.davem@davemloft.net/>) by the idea of adding header-insertion capabilities to the Linux kernel: 
+
+And honestly, this stuff sounds so easy to misuse by governments and other entities. It could also be used to allow ISPs to limit users in very undesirable and unfair ways. And honestly, surveillance and limiting are the most likely uses for such a facility. I can't see it legitimately being promoted as a "security" feature, really. 
+
+It is not hard to imagine how injected headers could be used. They could mark "slow lane" packets, for example, or packets that should be forwarded to that mysterious locked room in an Internet service provider's basement. These are not capabilities that Linux developers are generally enthusiastic about supporting; it is thus not surprising that Miller made it clear that he is in no hurry to merge this code into the networking subsystem. 
+
+Herbert [acknowledged](<https://lwn.net/ml/netdev/CALx6S37uWDOgWqx_8B0YunQZRGCyjeBY_TLczxmKZySDK4CteA@mail.gmail.com/>) Miller's concerns, but noted that router vendors will engage in abuse regardless of whether Linux supports a specific feature. None of this behavior requires the use of extension headers at all. Adding better extension header support to the kernel, though, might be a way to minimize the scope of these abuses in the future: 
+
+This is why Linux is so critical to networking, it is the only open forum where real scrutiny is applied to how protocols are implemented. If the alternatives are given free [rein] to lead then it's very likely we'll end up being stuck with what they do and probably have to follow their lead regardless of how miserable they make the protocols. We've already seen this in segment routing, their attempts to kill IP fragmentation, and all the other examples of protocol ossification that unnecessarily restrict what hosts are allowed to send in the network and hence reduce the utility and security we are able to offer the user. 
+
+One way in which Herbert hopes to improve the situation is via a new [attribution option](<https://datatracker.ietf.org/doc/draft-herbert-6man-eh-attrib/>) that would at least allow network managers to determine the source of an injected extension header that is causing problems. As things stand now, there is no way to know which system may be injecting problematic headers into packets as they pass through. More generally, he hopes that showing how to do things "right" will help to deter the worst hacks. Miller was [skeptical](<https://lwn.net/ml/netdev/20200103.124517.1721098411789807467.davem@davemloft.net/>) about whether this could work; Herbert [countered](<https://lwn.net/ml/netdev/CALx6S34vyjNnVbYfjqB1mNDDr3-zQixzXk=kgDqjJ0yxHVCgKg@mail.gmail.com/>) with protocols like QUIC, TLS, and TCP fast open as examples of how Linux developers have been able to steer protocols in a better direction in the past. 
+
+That is where the conversation stands as of this writing. How it is resolved matters, though. For all practical purposes, Linux is the reference implementation and the proving ground for the protocols that make up the public Internet. Adoption by Linux ensures that a feature will be available across the net; rejection can doom a feature in the long run. But rejection also abdicates the community's role in the development of new protocols, and Linux, too, can be routed around if the forces driving a feature are strong enough. Whether we want to resist header injection or to try to mitigate its worst abuses from the inside is a question that the networking community will need to find an answer to in the relatively near future.

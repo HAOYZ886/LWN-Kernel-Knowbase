@@ -1,0 +1,36 @@
+---
+title: "The kernel's code of conduct, one week later"
+url: https://lwn.net/Articles/766699/
+date: "September 26, 2018"
+category: "Development model-Developer conduct"
+author: "By Jonathan Corbet September 26, 2018"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+September 26, 2018
+
+The dust has begun to settle after the abrupt decisions by Linus Torvalds to take a break from kernel maintainership and to adopt a code of conduct for the community as a whole. Unsurprisingly, the development community, most of which was not consulted prior to the adoption of this code, has a lot of questions about it and a number of concerns. While many of the answers to those questions will be a while in coming, a few things are beginning to come into focus. 
+
+It is worth starting with one important point that [last week's article](<https://lwn.net/Articles/765108/>) failed to mention: the new code of conduct is not actually new to the community as a whole. In particular, the DRM (graphics) subsystem [adopted](<https://git.kernel.org/linus/8676df503092dcdd757b1120fab03bfbce0ae1e7>) the [freedesktop.org code of conduct](<https://www.freedesktop.org/wiki/CodeOfConduct/>) in April 2017. This code, like the code for the kernel as a whole, is derived from the Contributor Covenant text. There have not been any problems of note arising from the use of this code in that subsystem to date. Your editor has been told that the DRM community's successful use of this code was a direct contributor to Torvalds's choice of this particular code as a starting point for the kernel. 
+
+One area of concern in the public discussion has been over the prohibition of the posting of "private information", explicitly including email addresses. Some maintainers read that as a prohibition against including tags in patches, most of which contain such addresses. Some, like Signed-off-by or Reviewed-by, are provided by the person involved and should be relatively uncontroversial. Others, like Cc or Reported-by, are likely to be added by a developer or maintainer. Unsurprisingly, maintainers do not like the idea of unwittingly violating the code simply by doing their jobs. Mauro Carvalho Chehab has [argued this point](<https://lwn.net/ml/ksummit-discuss/20180918162948.769dda1d@coco.lan/>), saying: ""We should solve this quickly, as otherwise maintainers may need to postpone asking for pulling from any branches on trees that contain patches with such tags"". 
+
+Those who have looked at the issue seem to be under the impression that, by posting an email to a public list, one has "published" one's own email address and it is no longer private information. This appears to be true even under some of the stricter privacy legislation found around the world. So the use of these addresses in patch tags would not appear to be problematic. Still, the prohibition as expressed in the code appears to be better suited to projects using online hosting sites rather than email for their patch flow. At some point, it would probably make sense to amend the code to clarify the intended rules. 
+
+Another area of concern is that the code places the responsibility for enforcement on all maintainers. There are now numerous kernel maintainers who never asked for this responsibility, and who lack a clear idea of what they are actually responsible for. As Shuah Khan [put it](<https://lwn.net/ml/ksummit-discuss/cf7638b9-c25d-d47e-f539-192a43268122@kernel.org/>): ""I have to not only worry about the quality of code and technical aspects, but also be responsible for behavior of individuals I might not have any control or sway over"". Khan is not alone in wondering what this requirement actually means for maintainership going forward. 
+
+Those questions will be harder to answer. In a community as large as the kernel, the responsibility for enforcing the rules must necessarily be distributed across the maintainers. It is not up to one person (or some sort of elected board) to ensure that patches live up to the coding style rules or have proper signoffs. The same will have to be true for the kernel's conduct standards. But if the responsibility for calling out abusive behavior lies solely on the shoulders of the maintainers, it is easy to predict that maintainer turnover will increase in the future. If the community truly wants to be a more welcoming place, it will have to be up to all members to encourage each other toward better behavior when it is needed. 
+
+In truth, that encouragement is all that is needed a great deal of the time, and anybody can do it. If the more repressive measures envisioned in the code of conduct are invoked with any sort of frequency, something will have gone badly wrong. With any luck at all, most maintainers will never see anything requiring more than an admonition and a request for more attention in the future. For those who do run into something worse, the project as a whole will need to provide resources and support. Consulting with the Technical Advisory Board is one such resource, but it is likely to be insufficient. 
+
+There have been some suggestions for changes to the code of conduct already, and more are sure to come. The code is almost certain to evolve to better fit the kernel community, but the process by which that evolution can happen has not been worked out — or even thought about much. Future changes will require discussion and widespread acceptance; they cannot just be applied like the current code was. 
+
+In summary, there are a lot of questions, and many of the answers have yet to be worked out. Getting there will take some time. It seems likely that there will be significant discussion of the topic at the Maintainers Summit in October, but there may not be many hard answers coming from there. After 27 years, we still haven't finished bashing the kernel into shape; the code of conduct and its associated processes should come together rather more quickly than that, but some patience may still be required. 
+
+Finally, it is worth being aware of the fear, uncertainty, and doubt (FUD) attacks against the kernel community that the code has brought about. Some developers feel better about the code than others at this point, but their concerns are expressed in a rather different manner than the various trolling messages that have appeared on linux-kernel, and which have seemingly been taken seriously by the mainstream press. We are _not_ in that much trouble, and we do not, for example, have actual developers asserting a hypothetical right to revoke the GPL licensing from their contributions. 
+
+Reading some of those emails (not to mention some of the unpleasant stuff found on the wider Internet), it's hard not to feel that our community is under attack from the outside. Hopefully those people will soon get bored and go back to trying to stir up trouble elsewhere. To the extent that we can encourage their departure by not responding to obvious trolling emails, the better off we will be. As a community, we are far stronger than those who would seek to tear us apart.

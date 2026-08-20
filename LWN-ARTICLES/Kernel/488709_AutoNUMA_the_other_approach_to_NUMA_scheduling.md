@@ -1,0 +1,36 @@
+---
+title: "AutoNUMA: the other approach to NUMA scheduling"
+url: https://lwn.net/Articles/488709/
+date: "March 27, 2012"
+category: "Memory management-NUMA systems; NUMA; Scheduler-NUMA"
+author: "By Jonathan Corbet March 27, 2012"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+March 27, 2012
+
+Last week's Kernel Page included [an article](<https://lwn.net/Articles/486858/>) on Peter Zijlstra's NUMA scheduling patch set. As it happens, Peter is not the only developer working in this area; Andrea Arcangeli has posted a NUMA scheduling patch set of his own called [AutoNUMA](<https://lwn.net/Articles/488686/>). Andrea's goal is the same - keep processes and their memory together on the same NUMA node - but the approach taken to get there is quite different. These two patch sets embody a disagreement on how the problem should be solved that could take some time to work out. 
+
+Peter's patch set works by assigning a "home node" to each process, then trying to concentrate the process and its memory on that node. Andrea's patch lacks the concept of home nodes; he thinks it is an idea that will not work well for programs that don't fit into a single node unless developers add code to use Peter's new system calls. Instead, Andrea would like NUMA scheduling to "just work" in the same way that transparent huge pages do. So his patch set seems to assume that resources will be spread out across the system; it then focuses on cleaning things up afterward. The key to the cleanup task is a bunch of statistics and a couple of new kernel threads. 
+
+The first of these threads is called `knuma_scand`. Its primary job is to scan through each process's address space, marking its in-RAM anonymous pages with a special set of bits that makes the pages look, to the hardware, like they are not present. If the process tries to access such a page, a page fault will result; the kernel will respond by marking the page "present" again so that the process can go about its business. But the kernel also tracks the node that the page lives on and the node the accessing process was running on, noting any mismatches. For each process, the kernel maintains an array of counters to track which node each of its recently-accessed pages were located on. For pages, the information tracked is necessarily more coarse; the kernel simply remembers the last node to access each page. 
+
+When the time comes for the scheduler to make a decision, it passes over the per-process statistics to determine whether the target process would be better off if it were moved to another node. If the process seems to be accessing most of its pages remotely, and it is better suited to the remote node than the processes already running there, it will be migrated over. This code drew [a strenuous objection](<https://lwn.net/Articles/488716/>) from Peter, who does not like the idea of putting a big for-each-CPU loop into the middle of the scheduler's hot path. After some light resistance, Andrea agreed that this logic eventually needs to find a different home where it would run less often. For testing, though, he likes things the way they are, since it causes the scheduler to converge more quickly on its chosen solution. 
+
+Moving processes around will only help so much, though, if their memory is spread across multiple NUMA nodes. Getting the best performance out of the system clearly requires a mechanism to gather pages of memory onto the same node as well. In the AutoNUMA patch, the first non-local fault (in response to the special page marking described above) will cause that page's "last node ID" value to be set to the accessing node; the page will also be queued to be migrated to that node. A subsequent fault from a different node will cancel that migration, though; after the first fault, two faults in a row from the same node are required to cause the page to be queued for migration. 
+
+Every NUMA node gets a new kernel thread (`knuma_migrated`) that is charged with passing over the lists of pages queued for migration and actually moving them to the target node. Migration is not unconditional - it depends, for example, on there being sufficient memory available on the destination node. But, most of the time, these migration threads should manage to pull pages toward the nodes where they are actually used. 
+
+Beyond the above-mentioned complaint about putting heavy computation into `schedule()`, Peter has found a number of things to dislike about this patch set. He [doesn't like the worker threads](<https://lwn.net/Articles/488717/>), to begin with: 
+
+The problem I have with farming work out to other entities is that its thereafter terribly hard to account it back to whoemever caused the actual work. Suppose your kworker thread consumes a lot of cpu time -- this time is then obviously not available to your application -- but how do you find out what/who is causing this and cure it? 
+
+Andrea responds that the cost of these threads is small to the point that it cannot really be measured. It is a little harder to shrug off Peter's other complaint, though: that this patch set consumes a large amount of memory. The kernel maintains one `struct page` for every page of memory in the system. Since a typical system can have millions of pages, this structure must be kept as small as possible. But the AutoNUMA patch adds a `list_head` structure (for the migration queue) and two counters to each `page` structure. The end result can be a lot of memory lost to the AutoNUMA machinery. 
+
+The plan is to eventually move this information out of `struct page`; then, among other things, the kernel can avoid allocating it at all if AutoNUMA is not actually in use. But, for the NUMA case, that memory will still be consumed regardless of its location, and some users are unlikely to be happy even if others, as Andrea [asserts](<https://lwn.net/Articles/488718/>), will be happy to give up a big chunk of memory if they get a 20% performance improvement in return. This looks like an argument that will not be settled in the near future, and, chances are, the memory impact of AutoNUMA will need to be reduced somehow. Perhaps, your editor naively suggests, `knuma_migrated` and its per-page `list_head` structure could be replaced by the "lazy migration" scheme used in Peter's patch. 
+
+NUMA scheduling is hard and doing it right requires significant expertise in both scheduling and memory management. So it seems like a good thing that the problem is receiving attention from some of the community's top scheduler and memory management developers. It may be that one or both of their solutions will be shown to be unworkable for some workloads to the point that it simply needs to be dropped. What may be more likely, though, is that these developers will eventually stop poking holes in each other's patches and, together, figure out how to combine the best aspects of each into a working solution that all can live with. What seems certain is that getting to that point will probably take some time.

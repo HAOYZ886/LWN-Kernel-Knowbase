@@ -1,0 +1,32 @@
+---
+title: Security modules and ioctl()
+url: https://lwn.net/Articles/428140/
+date: "February 16, 2011"
+category: "Security-Security modules; ioctl"
+author: "By Jonathan Corbet February 16, 2011"
+---
+
+> **Ready to give LWN a try?**
+> 
+> With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features. We are pleased to offer you **[a free trial subscription](<https://lwn.net/Promo/nst-trial1/claim>)** , no credit card required, so that you can see for yourself. Please, join us! 
+
+By **Jonathan Corbet**  
+February 16, 2011
+
+The `ioctl()` system call has a bad reputation for a number of reasons, most of which are related to the fact that every implemented command is, in essence, a new system call. There is no way to effectively control what is done in `ioctl()`, and, for many obscure drivers, no way to really even know what is going on without digging through a lot of old code. So it's not surprising that code adding new `ioctl()` commands tends to be scrutinized heavily. Recently it turned out that there's another reason to be nervous about `ioctl()` \- it doesn't play well with security modules, and SELinux has been treating it incorrectly for the last couple of years. 
+
+SELinux works by matching a specific access attempt against the permissions granted to the calling process. For system calls like `write()`, the type of access is obvious - the process is attempting to write to an object. With `ioctl()`, things are not quite so clear. In past times, SELinux would attempt to deal with `ioctl()` calls by looking at the specific command to figure out what the process was actually trying to do; a `FIBMAP` command, for example (which reads a map of a file's block locations) would be allowed to proceed if the calling process had the permission to read the file's attributes. 
+
+There are a couple of problems with this approach, starting with the fact that the number of possible `ioctl()` commands is huge. Even without getting into obscure commands implemented by a single driver, trying to enumerate them all and determine their effects is a road to madness. But it gets worse, in that the intended behavior of a given command may not match what a specific driver actually does in response to that command. So the only way to really know what an `ioctl()` command will do is to figure out what driver is behind the call, and to have some knowledge of what each driver does. Simply creating this capability is not a task for sane people; maintaining it would not be a task for anybody wanting to remain sane. So security module developers were looking for a better way. 
+
+They thought they had found one when somebody realized that the command codes used by `ioctl()` implementations are not random numbers. They are, instead, a carefully-crafted 32-bit quantity which includes an 8-bit "type" field (approximately identifying the driver implementing the command), a driver-specific command code, a pair of read/write bits, and a size field. Using the read/write bits seemed like a great way to figure out what sort of access the `ioctl()` call needed without actually understanding the command. Thus, [a patch to SELinux](<http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=242631c49d4cf39642741d6627750151b058233b>) was merged for 2.6.27 which ripped out the command recognition and simply used the read/write bits in the command code to determine whether a specific call should be allowed or not. 
+
+That change remained for well over two years until Eric Paris [noticed](<https://lwn.net/Articles/428142/>) that, in fact, it made no sense at all. Most `ioctl()` calls involve the passing of a data structure into or out of the kernel; that structure describes the operation to be performed or holds data returned from the kernel - or both. The size field in the command code is the size of this structure, and the permission bits describe how the structure will be accessed by the kernel. Together, that information can be used by the core `ioctl()` code to determine whether the calling process has the proper access rights to the memory behind the pointer passed to the kernel. 
+
+What those bits do _not_ do, as Eric pointed out, is say anything about what the `ioctl()` call will do to the object identified by the file descriptor passed to the kernel. A call passing read-only data to the kernel may reformat a disk, while a call with writable data may just be querying hardware information. So using those bits to determine whether the call should proceed is unlikely to yield good results. It's an observation which seems obvious when spelled out in this way, but none of the developers working on security noticed the problem at the time. 
+
+So that code has to go - but, as of this writing, it has not been changed in the mainline kernel. There is a simple reason for that: nobody really knows what sort of logic should replace it. As discussed above, simply enumerating command codes with expected behavior is not a feasible solution either. So something else needs to be devised, but it's not clear what that will be. 
+
+Stephen Smalley [pointed out](<https://lwn.net/Articles/428143/>) one approach which was [posted](<http://marc.info/?l=linux-security-module&m=113088357020104&w=2>) back in 2005. That patch required drivers (and other code implementing `ioctl()`) to provide a special table associating each command code with the permissions required to execute the command. The obvious objections were raised at that time: changing every driver in the system would be a pain, `ioctl()` implementations are already messy enough as it is, the tables would not be maintained as the driver changed, and so on. The idea was eventually dropped. Bringing it back now seems unlikely to make anybody popular, but there is probably no other way to truly track what every `ioctl()` command is actually doing. That knowledge resides exclusively in the implementing code, so, if we want to make use of that knowledge elsewhere, it needs to be exported somehow. 
+
+Of course, the alternative is to conclude that (1) `ioctl()` is a pain, and (2) security modules are a pain. Perhaps it's better to just give up and hope that discretionary access controls, along with whatever checks may be built into the driver itself, will be enough. That is, essentially, the solution we have now.

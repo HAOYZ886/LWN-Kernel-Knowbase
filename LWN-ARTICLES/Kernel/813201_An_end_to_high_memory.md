@@ -1,0 +1,50 @@
+---
+title: "An end to high memory?"
+url: https://lwn.net/Articles/813201/
+date: "February 27, 2020"
+category: "Memory management-High memory"
+author: "By Jonathan Corbet February 27, 2020"
+---
+
+> **Benefits for LWN subscribers**
+> 
+> The primary benefit from [subscribing to LWN](<https://lwn.net/Promo/nst-nag5/subscribe>) is helping to keep us publishing, but, beyond that, subscribers get immediate access to all site content and access to a number of extra site features. Please sign up today! 
+
+By **Jonathan Corbet**  
+February 27, 2020
+
+[This patch](<https://lwn.net/ml/linux-kernel/20200211175507.178100-1-hannes@cmpxchg.org/>) from Johannes Weiner seemed like a straightforward way to improve memory-reclaim performance; without it, the virtual filesystem layer throws away memory that the memory-management subsystem thinks is still worth keeping. But that patch quickly ran afoul of a feature (or "misfeature" depending on who one asks) from the distant past, one which goes by the name of "high memory". Now, more than 20 years after its addition, high memory may be brought down low, as developers consider whether it should be deprecated and eventually removed from the kernel altogether. 
+
+#### A high-memory refresher
+
+The younger readers out there may be forgiven for not remembering just what high memory is, so a quick refresh seems in order. We'll start by noting, for the oldest among our readers, that it has nothing to do with the "high memory" concept found on early personal computers. That, of course, was memory above the hardware-implemented hole at 640KB — memory that was, according to a famous quote often attributed to Bill Gates, surplus to the requirements of any reasonable user. The kernel's notion of high memory, instead, is a software construct, not directly driven by the hardware. 
+
+Since the earliest days, the kernel has maintained a "direct map", wherein all of physical memory is mapped into a single, large, linear array in kernel space. The direct map makes it easy for the kernel to manipulate any page in the system; it also, on somewhat newer hardware, is relatively efficient since it is mapped using huge pages. 
+
+A problem arose, though, as memory sizes increased. A 32-bit system has the ability to address 4GB of virtual memory; while user space and the kernel could have distinct 4GB address spaces, arranging things that way imposes a significant performance cost resulting from the need for frequent translation lookaside buffer flushes. To avoid paying this cost, Linux used the same address space for both kernel and user mode, with the memory protections set to prevent user space from accessing the kernel's portion of the shared space. This arrangement saved a great deal of CPU time — at least, until the Meltdown vulnerability hit and forced the isolation of the kernel's address space. 
+
+The kernel, by default, divided the 4GB virtual address space by assigning 3GB to user space and keeping the uppermost 1GB for itself. The kernel itself fits comfortably in 1GB, of course — even 5.x kernels are smaller than that. But the direct memory map, which is naturally as large as the system's installed physical memory, must also fit into that space. Early kernels could only manage memory that could be directly mapped, so Linux systems, for some years, could only make use of a bit under 1GB of physical memory. That worked for a surprisingly long time; even largish server systems didn't exceed that amount. 
+
+Eventually, though, it became clear that the need to support larger installed memory sizes was coming rather more quickly than 64-bit systems were, so something would need to be done. The answer was to remove the need for all physical memory to be in the direct map, which would only contain as much memory as the available address space would allow. Memory above that limit was deemed "high memory". Where the dividing line sat depended entirely on the kernel configuration and how much address space was dedicated to kernel use, rather than on the hardware. 
+
+In many ways, high memory works like any other; it can be mapped into user space and the recipients don't see any difference. But being absent from the direct map means that the kernel cannot access it without creating a temporary, single-page mapping, which is expensive. That implies that high memory cannot hold anything that the kernel must be able to access quickly; in practice, that means any kernel data structure at all. Those structures must live in low memory; that turns low memory into a highly contended resource on many systems. 
+
+64-Bit systems do not have the 4GB virtual address space limitation, so they have never needed the high-memory concept. But high memory remains for 32-bit systems, and traces of it can be seen throughout the kernel. Consider, for example, all of the calls to `kmap()` and `kmap_atomic()`; they do nothing on 64-bit systems, but are needed to access high memory on smaller systems. And, sometimes, high memory affects development decisions being made today. 
+
+#### Inode-cache shrinking vs. highmem
+
+When a file is accessed on a Linux system, the kernel loads an [`inode` structure](<https://elixir.bootlin.com/linux/latest/source/include/linux/fs.h#L623>) describing it; those structures are cached, since a file that is accessed once will frequently be accessed again in the near future. Pages of data associated with that file are also cached in the page cache as they are accessed; they are associated with the cached inode. Neither cache can be allowed to grow without bound, of course, so the memory-management system has mechanisms to remove data from the caches when memory gets tight. For the inode cache, that is done by a "shrinker" function provided by the virtual filesystem layer. 
+
+In his patch description, Weiner notes that the inode-cache shrinker is allowed to remove inodes that have associated pages in the page cache; that causes those pages to also be reclaimed. This happens despite the fact that the inode-cache shrinker has no way of knowing if those pages are in active use or not. This is, he noted, old behavior that no longer makes sense: 
+
+This behavior of invalidating page cache from the inode shrinker goes back to even before the git import of the kernel tree. It may have been less noticeable when the VM itself didn't have real workingset protection, and floods of one-off cache would push out any active cache over time anyway. But the VM has come a long way since then and the inode shrinker is now actively subverting its caching strategy. 
+
+Andrew Morton, it turns out, [is the developer responsible](<https://marc.info/?l=git-commits-head&m=103646757213266&w=2>) for this behavior, which is driven by the constraints of high memory. Inodes, being kernel data structures, must live in low memory; page-cache pages, instead, can be placed in high memory. But if the existence of pages in the page cache can prevent inode structures from being reclaimed, then a few high-memory pages can prevent the freeing of precious low memory. On a system using high memory, sacrificing many pages worth of cached data may well be worth it to gain a few hundred bytes of low memory. Morton [said](<https://lwn.net/ml/linux-kernel/20200211154438.14ef129db412574c5576facf@linux-foundation.org/>) that the problem being solved was real, and that the solution cannot be tossed even now; ""a 7GB highmem machine isn't crazy and I expect the inode has become larger since those days"". 
+
+The conversation took a bit of a turn, though, when Linus Torvalds [interjected](<https://lwn.net/ml/linux-kernel/CAHk-=wiGbz3oRvAVFtN-whW-d2F-STKsP1MZT4m_VeycAr1_VQ@mail.gmail.com/>) that ""in the intervening years a 7GB highmem machine has indeed become crazy"". He continued that high memory should be now considered to be deprecated: ""In this day and age, there is no excuse for running a 32-bit kernel with lots of physical memory"". Others were quick to add their support for this idea; removing high-memory would simplify the memory-management code significantly with no negative effects on the 64-bit systems that everyone is using now. 
+
+Except, of course, not every system has a 64-bit CPU in it. The area of biggest concern is the Arm architecture, where 32-bit CPUs are still being built, sold, and deployed. Russell King [noted](<https://lwn.net/ml/linux-kernel/20200212085004.GL25745@shell.armlinux.org.uk/>) that there are a lot of 32-bit Arm systems with more than 1GB of installed memory being sold: ""You're probably talking about crippling support for any 32-bit ARM system produced in the last 8 to 10 years"". 
+
+Arnd Bergmann provided [a rather more detailed look](<https://lwn.net/ml/linux-kernel/CAK8P3a3pzgVvwyDhHPoiSOqyv+h_ixbsdWMqG3sELenRJqFuew@mail.gmail.com/>) at the state of 32-bit Arm systems; he noted that there is one TI CPU that is being actively marketed with the ability to handle up to 8GB of RAM. But, he said, many new Arm-based devices are actually shipping with smaller installed memory because memory sizes up to 512MB are cheap to provide. There are phones out there with 2GB of memory that still need to be supported, though it may be possible to support them without high memory by increasing the kernel's part of the address space to 2GB. Larger systems still exist, he said, though systems with 3GB or more ""are getting very rare"". Rare is not the same as nonexistent, though. 
+
+The conversation wound down without any real conclusions about the fate of high-memory support. Reading between the lines, one might conclude that, while it is still a bit early to deprecate high memory, the pressure to do so will only increase in the coming years. In the meantime, though, nobody will try to force the issue by regressing performance on high-memory systems; the [second version of Weiner's patch](<https://lwn.net/ml/linux-kernel/20200213183459.GB216470@cmpxchg.org/>) retains the current behavior on such machines. So users of systems needing high memory are safe — for now.

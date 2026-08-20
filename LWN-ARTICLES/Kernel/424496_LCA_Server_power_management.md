@@ -1,0 +1,44 @@
+---
+title: "LCA: Server power management"
+url: https://lwn.net/Articles/424496/
+date: "January 26, 2011"
+category: Power management
+author: "By Jonathan Corbet January 26, 2011"
+---
+
+> **Did you know...?**
+> 
+> LWN.net is a subscriber-supported publication; we rely on subscribers to keep the entire operation going. Please help out by [buying a subscription](<https://lwn.net/Promo/nst-nag4/subscribe>) and keeping LWN on the net. 
+
+By **Jonathan Corbet**  
+January 26, 2011
+
+Power management is often seen as a concern mostly for embedded and mobile systems. They worry about power management because we want our phones to run for longer between recharges and our laptops to not inflict burns on our thighs. But power management is equally important for data centers, which are currently responsible for about 3% of the total power consumption in the US. Keeping the net going in the US requires about ~~15TW~~ 15GW of power - the dedicated output of about 15 nuclear power plants. Clearly there would be some real value to saving some of that power. Matthew Garrett's talk during the Southern Plumbers Miniconf at linux.conf.au 2011 covered the work that is being done in that area and where Linux stands relative to other operating systems. 
+
+Much of the power consumed by data centers is not directly controllable by Linux - it is overhead which is consumed outside of the computers themselves. About one watt of power is consumed by overhead for each watt consumed by computation. This overhead includes network infrastructure and power supply loss, but the biggest component is air conditioning. So the obvious thing to do here is to create more efficient cooling and power infrastructure. Running at higher ambient temperatures, while uncomfortable for humans, can also help. The best contemporary data centers have been able to reduce their overhead to about 20% - a big improvement. Cogeneration techniques - using heat from data centers to warm buildings, for example - can reduce that overhead even further. 
+
+But we still have trouble. A 48-core system, Matthew says, will draw about 350W when it is idle; a rack full of such systems will still pull a lot of power. What can be done? Most power management attention has been focused on the CPU, which is where a lot of the power goes. As a result, an idle Intel CPU now draws approximately zero watts of power - it is "terrifying" [![\[Matthew Garrett\]](https://static.lwn.net/images/conf/2011/lca/MatthewGarrett-sm.jpg)](<https://lwn.net/Articles/424500/>) how well it works. When the CPU is working, though, the situation is a bit different; the power consumption is about 20W per core, or about 960W for a busy 48-core system. 
+
+The clear implication is that we should keep the CPUs idle whenever possible. That can be tricky, though; it is hard to write software which does nothing. Or - as Matthew corrected himself - it's hard to write _useful_ software which does nothing. 
+
+There are some trends which can be pointed to in this area. CPU power management is essentially solved; Linux is quite good at it. In fact, Linux is better than any other operating system with regard to CPU power; we have more time in deep idle states and fewer wakeups than others. So interest is shifting toward memory power management. If all of the CPUs in a package within the system can be idled, the associated memory controller will go idle as well. It's also possible to put memory into "self-refresh" mode if it is idle, reducing power use while preserving the contents. In other situations, running memory at a lower clock rate can reduce power usage. There will be a lot of work in this area because, at this point, memory looks like the biggest, lowest-hanging fruit. 
+
+Even more power can be saved by simply turning a system off; that is where virtualization comes into play. If applications are run on virtualized servers, those servers can be consolidated onto a small number of machines during times of low load, allowing the other machines to be powered down. There is a great deal of customer interest in this capability, but there is still work to be done; in particular, we need fast guest migration, which is a hard problem to solve. 
+
+The other hard problem is the fact that optimal power behavior may make tradeoffs which enterprise customers may be unwilling to make. Performance matters for these people, and, if that means expending more energy, they are willing to pay that cost. As an example, consider the `gettimeofday()` system call which, while having been ruthlessly optimized, can still be slower than some people would like. Simply reading the processor's time stamp counter (TSC) can be faster. The problem is that the TSC can become unreliable in the presence of power management. Once upon a time, changing the CPU frequency would change the rate of the TSC, but that problem has been solved by the CPU vendors for a few years now. So TSC problems are no longer an excuse to avoid lowering the clock frequency. 
+
+Unfortunately, that is not too useful, because it rarely makes sense to run a CPU at a lower frequency; best results usually come from running at full speed and spending more time in a sleep state ("C state"). But C states can stop the TSC altogether, once again creating problems for performance-sensitive users. In response, manufacturers have caused the TSC to run even when the CPU is sleeping. So, while virtualization remains a hassle, systems running on bare metal can expect the TSC to work properly in all power management states. 
+
+But that still doesn't satisfy some performance-sensitive users because deep C states create latency. It can take a millisecond to wake a CPU out of a deep sleep - that is a very long time in some applications. We have the [pm_qos mechanism](<https://lwn.net/Articles/386139/>) which can let the kernel know whether deep sleeps are acceptable at any given time, allowing power management to happen when latency is not an immediate concern. Not a perfect solution, but that may be as good as it gets for now. 
+
+Another interesting feature of contemporary CPUs is the "turbo" mode, which can allow a CPU to run in an overclocked mode for a period of time. Using this mode can get work done faster, allowing longer sleeps and better power behavior, but it depends on good power management if it is to work at all. If a core is to run in turbo mode, all other cores on the same die must be in a sleep state. The end result is that turbo mode can give good results for single-threaded workloads. 
+
+Some effort is going into powering down unused hardware components - I/O controllers, for example - even though the gains to be had in this area are relatively small. Many systems have quite a few USB ports, many of which are entirely unused. Versions 1 and 2 of the USB specification make powering down those port hard; even worse, those ports will repeatedly wake the CPU even if nothing is plugged in. USB 3 is better in this regard. 
+
+Unfortunately, even in this case, it's hard to power down the ports because it is a feature which is poorly specified, poorly documented, and poorly implemented. The reliability of the hardware varies; Windows tends not to use the PCI power management event infrastructure, so it often simply does not work. This problem has been solved by polling the hardware once every second; that is "the least bad thing" they could come up with. The result is better power behavior, but also up to one second of latency before the system responds to the plugging-in of a new USB device. Since, as Matthew noted, that one second is probably less than the user already lost while trying to insert the plug upside-down, it shouldn't be a problem. 
+
+Similar things can be done with other types of hardware - firewire ports, audio devices, SD ports, etc. It's just a matter of figuring out how to make it work. There is also some interest in reducing the power consumption of graphics processors (GPUs), even though enterprise systems tend not to have fancy GPUs. The level of support varies from one GPU to the next, but work is being done to improve power consumption for most of them. 
+
+Work for the future includes better CPU frequency governor development; we need to do better at ramping up the processor's frequency when there is work to be done. The scheduler needs tweaks to do a better job of consolidating jobs onto one package, allowing others to be powered down. And there is the continued exploitation of other power management features in hardware; there are a lot of them that we are not using. On the other hand, others are not using those features either, so they probably do not work. 
+
+In summary: Linux is doing pretty well with regard to enterprise-level power management; the GPU is the only place where we perform worse than Windows does. But we can always do better, so work will continue in that direction.

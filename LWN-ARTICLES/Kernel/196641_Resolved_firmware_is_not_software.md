@@ -1,0 +1,33 @@
+---
+title: "Resolved: firmware is not software"
+url: https://lwn.net/Articles/196641/
+date: "August 23, 2006"
+category: Copyright issues
+author: 
+---
+
+On July 17, the Debian release team [posted an update](<http://lwn.net/Articles/191721/>) on the upcoming "etch" distribution. Things appeared to be moving along nicely. Many of the important transitions have been made, the kernel was set to be frozen on July 30, and the final release (to be numbered 4.0) was on track to happen, as scheduled, on December 4 of this year. It all looks like the smoothest release process Debian has had in quite some time. 
+
+For experienced Debian watchers, this seems too good to be true. And, in fact, that's exactly what it might be; behind the scenes, it looks like the etch release may get caught up on an old problem. On August 3, Debian developer Nathanael Nerode [claimed that the etch timeline is unrealistic](<https://lwn.net/Articles/196646/>) because the kernel will not be ready in time. The issue, in particular, is that of device firmware. 
+
+Some background: most devices attached to a modern systems are special-purpose computers in their own right, running their own software. Some of these devices store that software ("firmware") in a ROM within the device itself. Over the years, however, manufacturers have found that loading the firmware from the host system is both cheaper and more flexible. As a result, much current hardware is unable to function in any useful way until the host computer has fed it the requisite firmware. This firmware load is handled by the device driver. 
+
+Once upon a time, a great many drivers had the necessary firmware linked into the kernel itself. In many cases, over time, that firmware has been stripped out into a separate file which can be fed to the kernel at device initialization time. In others, however, the firmware remains in the kernel itself. Often, that firmware carries explicit permission which allows it to be distributed in that way, so licensing issues do not usually come into the picture. 
+
+The Debian Project, however, is not satisfied with distributable firmware - or, at least, many vocal Debian developers are not satisfied. Unless there is accompanying source which can be used to rebuild that firmware, said firmware is not seen to be truly free, and, thus, has no part in Debian. According to this point of view, it is not possible to ship a kernel which is compliant with the [Debian Free Software Guidelines](<http://www.debian.org/social_contract>) (DFSG) until all of that firmware has been torn out of it. Since this work has not been done - the Debian kernel maintainers being more concerned with the production of a working and secure kernel - the kernel cannot be frozen, and the etch timeline cannot be met. 
+
+There is another point of view within the project however. According to this perspective, Debian is shipping an operating system for the host CPU, not for all of the peripherals attached to that CPU. As long as the core operating system is free, that is good enough. The peripheral devices will, regardless of anything Debian does, be running non-free software. Adopting a policy which favors devices having their proprietary software in ROM (where it can never, ever be changed) over those which accept their firmware from the host (where, maybe, someday it could be rebuilt and tinkered with) seems like a step in the wrong direction. To people who see things this way, trying to purge non-free firmware distracts developers from more useful work while simultaneously making things harder for Debian's users. 
+
+This is, to put it mildly, not a particularly new discussion. Despite having come around many times over the years, however, this question has never really been resolved. In an effort to bring it to a resolution this time around, Steve Langasek has [proposed a general resolution](<https://lwn.net/Articles/196654/>) stating, in essence, that Debian can ship "data" without the need for accompanying source. Data, in this sense, includes things like graphics (splash screens, icons, etc.), videos, and fonts. If this resolution is voted on and passes, the position taken by the project will be that, as long as the "data" itself is freely distributable, the project can ship it without source and remain true to its goals. 
+
+The final part of the proposed resolution takes things one step further by stating explicitly that firmware is, for the purposes of the DFSG's source requirements, not a program. Device firmware is, instead, data which, under the terms of the resolution, can be shipped without source. 
+
+Needless to say, this proposal has inspired some discussion. Many developers are in favor of the proposal, and have seconded it. Others have requested that it be split into two parts, with the firmware-as-data issue being voted upon separately. Some remain firmly opposed to shipping anything without source; these people do not like the resolution at all. 
+
+Then, there is [the position taken by Sven Luther](<https://lwn.net/Articles/196663/>), a member of the Debian kernel team. Sven states that calling firmware "data" is fundamentally dishonest, and that this fiction will inevitably lead Debian toward becoming a non-free distribution. What he would like to see, instead, is a resolution that, while firmware remains a problem, it is one which has been with Debian for a long time and which is not going to be solved within the etch release schedule. So, Sven proposes: 
+
+We thus ask the project to temporarily waive the DFSG requirement for those non-free firmware blobs, in order to let the etch release to ship in a timely fashion, and let us work on these issues, within the kernel and related affected teams, the project as a whole (The DPL could mandate a delegate or delegate team to contact manufacturers and such), but also upstream, in a calm and posed way, not hurried by the needs of the release, and other such pressure. 
+
+Sven will likely format this proposal into a competing resolution for a vote by the developers. 
+
+What this alternative resolution really looks like, of course, is yet another decision to defer the issue and argue about it again in the next release cycle. But this could be just how the decision goes in the end. Many developers have little patience with the firmware battles and with the push to break working drivers. There is also a real unease, however, with shipping binary firmware blobs, and simply rebranding those blobs as "data" may not be enough to make people feel better about it. So Debian may well punt the issue again; expect its return in a year or two.
