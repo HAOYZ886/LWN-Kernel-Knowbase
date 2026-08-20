@@ -1,0 +1,52 @@
+---
+title: "Sched-ext: enqueue() for sub-schedulers and proxy-execution support"
+url: https://lwn.net/Articles/1082717/
+date: "July 16, 2026"
+category: "Scheduler-Deadline scheduling; Scheduler-Extensible scheduler class"
+author: "By Jonathan Corbet July 16, 2026"
+---
+
+> **Ready to give LWN a try?**
+> 
+> With a subscription to LWN, you can stay current with what is happening in the Linux and free-software community and take advantage of subscriber-only site features. We are pleased to offer you **[a free trial subscription](<https://lwn.net/Promo/nst-trial1/claim>)** , no credit card required, so that you can see for yourself. Please, join us! 
+
+By **Jonathan Corbet**  
+July 16, 2026
+
+The [extensible scheduler class](<https://docs.kernel.org/scheduler/sched-ext.html>) (sched_ext) allows the installation of custom CPU schedulers as a set of BPF programs. While sched_ext, in its current form, has already led to a lot of interesting scheduler-development work, the subsystem itself is still undergoing rapid evolution. Among other work, the ability to set up a hierarchy of [sub-schedulers](<https://lwn.net/Articles/1056014/>) is approaching completion, and a longstanding incompatibility with [proxy execution](<https://lwn.net/Articles/934114/>) is coming to an end. 
+
+#### The sub-scheduler enqueue path
+
+Sched_ext, as originally implemented, only allowed the installation of a single custom scheduler on any given system. It did not take long, though, for users of multi-tenant systems to request the ability to set up different schedulers for different groups of processes. The result was the addition of sub-schedulers, which associate a sched_ext scheduler with a control group; all processes within the given group will be managed by the attached scheduler. As with control groups in general, sched_ext schedulers are arranged into a hierarchy, with higher-level schedulers deciding when the lower levels are able to place processes on a CPU. 
+
+The initial sub-scheduler work was merged for the 7.1 kernel release, but it is incomplete. Specifically, sub-schedulers can handle the dispatch path — choosing which process to run next on a given CPU. Dispatch handling is hierarchical, in that a parent-group scheduler decides when to run the dispatch handler for each of its attached subgroup schedulers. Dispatching can take a process out of a dispatch queue, but it does not address how they are placed into that queue to begin with. 
+
+[This series](<https://lwn.net/ml/all/20260709225041.1695495-1-tj@kernel.org>) from Tejun Heo addresses the enqueue path which, naturally, turns out to have complexities of its own. The dispatch side is relatively easy; control proceeds down the scheduler hierarchy, with each level deciding which sub-scheduler below it is allowed to place tasks onto a given CPU's queue at any given time. A sub-scheduler's `enqueue()` callback, though, can be invoked at any time, directly from the scheduler core, when a task under its control becomes runnable. It can then (in current kernels) place that task on any CPU's dispatch queue, with the ability to preempt whatever is running there, regardless of whether the preempted task is under the same scheduler's control or not. 
+
+Control groups are meant to provide isolation between groups of processes, and the enqueue path needs to preserve that isolation. Since scheduling is a performance-critical activity, the enqueue path should, if possible, avoid calling up through the scheduler hierarchy to decide whether a given sub-scheduler is able to make a specific placement decision. The answer to that problem is a capability mechanism that allows schedulers to share some of their access with any sub-schedulers below them. 
+
+When a sub-scheduler attaches to the hierarchy, it initially has no access to any CPUs in the system. Its parent can then (with a call to `scx_bpf_sub_grant()`) give the new scheduler the ability to access a specific set of CPUs. That access comes in three levels: the ability to place a task on an idle CPU, the ability to put tasks into the CPU's dispatch queue for later execution, and the ability to preempt a task that is controlled by another scheduler. The root scheduler has all capabilities on all CPUs; it can then pass all or some of them down to the sub-schedulers that attach to it. A scheduler can only give capabilities to sub-schedulers that it, itself, possesses. 
+
+If a sub-scheduler tries to enqueue a task onto a CPU where it lacks the required capabilities, the task will be diverted to a special reject queue, after which it will be handed back to the same sub-scheduler's `enqueue()` callback with a special flag (`SCX_TASK_REENQ_CAP`) telling the scheduler to try again. A similar thing happens if a parent revokes capabilities previously given to a sub-scheduler: any tasks scheduled on the affected CPUs will be removed, then passed back to the sub-scheduler for a new placement. 
+
+With these changes, the sub-scheduler work is nearing completion, though there are a couple of remaining details listed by Heo in the cover letter. One is that moving a process from one control group to another will not change the sub-scheduler that controls it. The other is that it is possible to restrict (using, for example, [`sched_setaffinity()`](<https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html>)) a process to a set of CPUs outside of those that its sub-scheduler is able to run processes on; in that case, the process ends up being unable to run anywhere. That state of affairs will certainly improve isolation, but the owner of the affected process is unlikely to appreciate that improvement. 
+
+Those problems will have to wait for further work. Meanwhile, the patches for the enqueue path have been through five revisions (as of this writing) and are currently on track for merging into the 7.3 kernel release. 
+
+#### Getting along with proxy execution
+
+Priority inversion happens when a low-priority process holds a resource needed by a higher-priority process, but the low-priority process is unable to run. Priority inheritance — letting the resource-holding process run at the waiting process's priority until it releases the resource — is a commonly used solution to the problem, but priority inheritance is not applicable to [deadline scheduling](<https://lwn.net/Articles/743740/>). Deadline tasks do not use priorities, but they can still be blocked on resources held by other processes. 
+
+The solution in that case is proxy execution, which can be thought of as an extension of the priority-inheritance idea. With proxy execution, the waiting process's entire scheduling context is loaned to the resource-holding process, allowing it to run in the waiting process's place (and using the waiting process's resources). In the absence of proxy execution, a process that blocks on a mutex will be removed from its run queue. When proxy execution is enabled, instead, that process will remain in its run queue; when the scheduler picks it to run in a CPU, the link to the process holding the mutex will be followed, and that process will be executed in its place, using its scheduling context. 
+
+This algorithm works for the kernel's built-in scheduler, but it can create confusion when sched_ext is in use. A sched_ext scheduler, believing that it has decided which process runs, will likely be surprised to find a different process (which, perhaps, is entirely outside of its control) running instead. For this reason, proxy execution and sched_ext have been made mutually exclusive in the kernel's configuration system; a kernel can only be built with one of them enabled. If nothing else, this situation creates problems for distributors, which would rather not have to choose between two features that its users will want access to. 
+
+A potential solution to this problem can be found in [this patch set](<https://lwn.net/ml/all/20260716132229.61603-1-arighi@nvidia.com>) from Andrea Righi and John Stultz. It makes two fundamental changes to how sched_ext works with proxy execution, the first of which is to hide most of it from sched_ext schedulers entirely. When a scheduler selects a blocked process to run, the lock holder will be transparently run instead, but the sched_ext scheduler will never see that redirection, so it will not be surprised to find a process running that it didn't schedule, and may not control at all. The waiting process's scheduling context will be used, and that process will be charged for the CPU time used by the lock holder. 
+
+During proxy execution, the waiting process's scheduling context will be moved to the CPU on which the lock holder is running. Once the lock has been released, the scheduling context is moved back, and the scheduler is invoked to re-enqueue the (now runnable) process. 
+
+Before any of this can happen, though, the scheduler must indicate to the sched_ext core that it is willing to participate in proxy execution; that is done by providing the new `SCX_OPS_ENQ_BLOCKED` flag at registration time. When a scheduler has registered itself that way, processes that are blocked on a mutex will be passed to the scheduler's `enqueue()` callback with the `SCX_ENQ_BLOCKED` flag set. The scheduler can then decide if it wants to handle the scheduling of the blocked task specially. The series includes [a simple change](<https://lwn.net/ml/all/20260713162112.26785-10-arighi@nvidia.com>) to the example `scx_qmap` scheduler that causes it to schedule blocked tasks immediately, preempting whatever happens to be running at the time. This ""intentionally unfair"" policy is meant to make proxy execution easy to observe; it also shows how little is needed to make a sched_ext scheduler work with proxy execution once the infrastructure is in place. 
+
+How well proxy execution will work will depend, though, on the mix of processes in the system. If sched_ext is only in charge of some of the running processes, it will find itself unable to preempt those running outside of sched_ext, which will have a higher priority. There is a table in the changelog of [this patch](<https://lwn.net/ml/all/20260713162112.26785-5-arighi@nvidia.com>) describing what happens in eight different situations, depending on the scheduling status of the waiting process, the lock holder, and an unrelated competing process on the CPU. 
+
+This series has been through seven revisions to date, and is aimed at merging for the 7.3 release.
